@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">Vector Assistant</string>
+    <string name="accessibility_service_description">Vector Voice Assistant service to automate phone tasks, click buttons, and execute hands-free voice commands.</string>
+    <string name="wake_word_phrase">Hey Vector / Suno Vector</string>
+    <string name="notification_title">Vector is Listening</string>
+    <string name="notification_desc">Screen-off background voice control active. Say \'Hey Vector\' or \'Suno Vector\'.</string>
+    <string name="status_listening">Listening for your voice...</string>
+    <string name="status_inactive">Vector is paused</string>
+    <string name="voice_trained">Owner Voice Profile: ACTIVE</string>
+    <string name="voice_not_trained">Voice Profile: NOT REGISTERED (Tap to Train)</string>
+</resources>
