@@ -5,6 +5,9 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -36,9 +39,20 @@ jobs:
         name: VectorAssistant-Debug-APK
         path: app/build/outputs/apk/debug/*.apk
 
-    - name: Upload Failure Log
-      if: failure()
-      uses: actions/upload-artifact@v4
+    - name: Create or Update GitHub Release
+      if: success()
+      uses: softprops/action-gh-release@v2
       with:
-        name: build-failure-log
-        path: build.log
+        tag_name: latest-apk
+        name: "Vector Assistant Latest APK"
+        body: |
+          ### 🚀 Vector Assistant APK (Ready to Install)
+          - **Voice Biometrics:** Sirf aapki awaz recognize karega ("Hey Vector" / "Suno Vector").
+          - **Screen-Off Active:** Phone lock hone par bhi background listening active rehti hai.
+          - **Gemini Pro AI:** Natural conversations, topic analysis, aur automated attractive WhatsApp campaigns.
+          - **Phone Controls:** Calls, Contacts Save, Call History, VIP Alerts, YouTube, Flashlight, Volume.
+          
+          Directly download the `.apk` file below and install it on your Android 13 device.
+        files: app/build/outputs/apk/debug/*.apk
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
