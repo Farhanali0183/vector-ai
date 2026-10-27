@@ -3,8 +3,6 @@ name: Build Vector Assistant APK
 on:
   push:
     branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
@@ -22,13 +20,21 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v3
+
     - name: Fix Line Endings and Permissions
       run: |
         sed -i 's/\r$//' gradlew
         chmod +x gradlew
 
+    - name: Accept Android SDK Licenses
+      run: |
+        yes | sdkmanager --licenses || true
+
     - name: Build Debug APK
-      run: ./gradlew assembleDebug --stacktrace
+      run: |
+        ./gradlew assembleDebug --stacktrace --no-daemon
 
     - name: Upload Debug APK Artifact
       uses: actions/upload-artifact@v4
