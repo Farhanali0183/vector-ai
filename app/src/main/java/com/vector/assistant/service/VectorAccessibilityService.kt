@@ -37,20 +37,20 @@ class VectorAccessibilityService : AccessibilityService() {
     }
 
     fun goHome() {
-        performGlobalAction(GLOBAL_ACTION_HOME)
+        performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
     }
 
     fun goBack() {
-        performGlobalAction(GLOBAL_ACTION_BACK)
+        performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
     }
 
     fun openNotifications() {
-        performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
+        performGlobalAction(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS)
     }
 
     fun lockScreen() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
+            performGlobalAction(AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)
         }
     }
 }

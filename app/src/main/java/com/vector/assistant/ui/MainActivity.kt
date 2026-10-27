@@ -73,11 +73,7 @@ class MainActivity : AppCompatActivity() {
         updateServiceStateUI()
         updateVipListUI()
         val filter = IntentFilter(VectorVoiceService.BROADCAST_LOG)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(logReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(logReceiver, filter)
-        }
+        ContextCompat.registerReceiver(this, logReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
     override fun onPause() {

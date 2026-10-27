@@ -208,7 +208,8 @@ class VectorVoiceService : Service() {
             // Ignore release exceptions
         }
 
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        @Suppress("DEPRECATION")
+        stopForeground(true)
         stopSelf()
         broadcastLog("Vector deactivated.")
     }
