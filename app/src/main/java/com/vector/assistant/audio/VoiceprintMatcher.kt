@@ -41,10 +41,10 @@ class VoiceprintMatcher(context: Context) {
         val currentCount = prefs.getInt("enrolled_samples_count", 0)
         val profileJson = prefs.getString("voice_profile_vector", null)
 
-        val updatedVector: FloatArray = if (profileJson == null || currentCount == 0) {
+        val existing = if (profileJson != null) gson.fromJson(profileJson, FloatArray::class.java) else null
+        val updatedVector: FloatArray = if (existing == null || currentCount == 0) {
             features
         } else {
-            val existing = gson.fromJson<FloatArray>(profileJson, object : TypeToken<FloatArray>() {}.type)
             FloatArray(features.size) { i ->
                 // Exponential moving average to combine voice samples
                 (existing[i] * currentCount + features[i]) / (currentCount + 1)
@@ -72,7 +72,7 @@ class VoiceprintMatcher(context: Context) {
      */
     fun matchScore(incomingAudio: ShortArray): Float {
         val profileJson = prefs.getString("voice_profile_vector", null) ?: return 1.0f // If not enrolled, allow open testing
-        val ownerVector = gson.fromJson<FloatArray>(profileJson, object : TypeToken<FloatArray>() {}.type)
+        val ownerVector = gson.fromJson(profileJson, FloatArray::class.java) ?: return 1.0f
         val incomingVector = extractFeatures(incomingAudio)
 
         return computeCosineSimilarity(ownerVector, incomingVector)
