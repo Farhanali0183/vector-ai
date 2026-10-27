@@ -443,6 +443,35 @@ class CommandExecutor(
         }
     }
 
+    private fun handleOpenApp(command: String) {
+        val appQuery = command.replace("open", "").replace("kholo", "").trim()
+        val pm = context.packageManager
+        val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+
+        var matchedPackage: String? = null
+        for (app in packages) {
+            val label = pm.getApplicationLabel(app).toString().lowercase()
+            if (label.contains(appQuery) || appQuery.contains(label)) {
+                matchedPackage = app.packageName
+                break
+            }
+        }
+
+        if (matchedPackage != null) {
+            val launchIntent = pm.getLaunchIntentForPackage(matchedPackage)
+            if (launchIntent != null) {
+                speaker.speak("$appQuery khol raha hoon")
+                launchIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                context.startActivity(launchIntent)
+                onLog("Action: Opened app $appQuery")
+                return
+            }
+        }
+
+        speaker.speak("App $appQuery nahi mila")
+        onLog("App not found: $appQuery")
+    }
+
     private fun toggleTorch(enable: Boolean) {
         try {
             val cameraId = cameraManager?.cameraIdList?.firstOrNull() ?: return
