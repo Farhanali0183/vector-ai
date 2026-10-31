@@ -2,6 +2,7 @@ package com.vector.assistant.ai
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -13,12 +14,12 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Connects Vector Assistant directly to Google Gemini Pro / Flash API.
- * Handles:
- * 1. Long-term memory-infused reasoning
- * 2. Multi-turn continuous conversation (Gemini Live Mode)
- * 3. High quality Roman Urdu / Urdu / English spoken responses
- * 4. Attractive bulk WhatsApp marketing & greeting generators
+ * Connects Vector Assistant directly to Google Gemini API.
+ * Features:
+ * 1. Automatic Model Fallback (Handles 404 model retirement/region differences gracefully)
+ * 2. Long-term memory-infused reasoning
+ * 3. Multi-turn continuous conversation (Gemini Live Mode)
+ * 4. High quality Roman Urdu / Urdu / English spoken responses
  */
 class GeminiBrainClient(private val context: Context) {
 
@@ -31,7 +32,17 @@ class GeminiBrainClient(private val context: Context) {
 
     companion object {
         private const val KEY_API_KEY = "gemini_api_key"
-        private const val DEFAULT_MODEL = "gemini-1.5-flash"
+        private const val KEY_WORKING_MODEL = "gemini_working_model"
+        private const val TAG = "GeminiBrainClient"
+
+        // Candidate models in priority order to prevent 404 Not Found
+        val CANDIDATE_MODELS = listOf(
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash-latest",
+            "gemini-1.5-flash",
+            "gemini-pro"
+        )
     }
 
     fun saveApiKey(apiKey: String) {
@@ -40,6 +51,14 @@ class GeminiBrainClient(private val context: Context) {
 
     fun getApiKey(): String? {
         return prefs.getString(KEY_API_KEY, null)
+    }
+
+    fun getWorkingModel(): String {
+        return prefs.getString(KEY_WORKING_MODEL, CANDIDATE_MODELS[0]) ?: CANDIDATE_MODELS[0]
+    }
+
+    fun setWorkingModel(model: String) {
+        prefs.edit().putString(KEY_WORKING_MODEL, model).apply()
     }
 
     fun isConnected(): Boolean {
@@ -57,7 +76,7 @@ class GeminiBrainClient(private val context: Context) {
     suspend fun askGemini(userPrompt: String, isContinuousSession: Boolean = false): String = withContext(Dispatchers.IO) {
         val apiKey = getApiKey()
         if (apiKey.isNullOrBlank()) {
-            return@withContext "Gemini API key configure nahi hai. App settings mein ja kar apni Gemini key lagayein."
+            return@withContext "Gemini API key configure nahi hai. App settings mein ja kar apni Gemini key enter karein."
         }
 
         val memoriesSnippet = memoryManager.getFormattedMemoriesForPrompt()
@@ -90,12 +109,12 @@ class GeminiBrainClient(private val context: Context) {
         }
         conversationHistory.add(userTurn)
 
-        // Limit conversation history to last 10 messages to save context and speed up response
+        // Limit conversation history to last 10 messages
         if (conversationHistory.size > 10) {
             conversationHistory.removeAt(0)
         }
 
-        val answer = callGeminiMultiTurnApi(apiKey, conversationHistory)
+        val answer = callWithModelFallback(apiKey, conversationHistory)
 
         // Add assistant response to history
         val modelTurn = JSONObject().apply {
@@ -116,29 +135,58 @@ class GeminiBrainClient(private val context: Context) {
     suspend fun generateAttractiveWhatsAppMessage(topic: String): String = withContext(Dispatchers.IO) {
         val apiKey = getApiKey()
         if (apiKey.isNullOrBlank()) {
-            return@withContext "Salam! Umeed hai aap khairiyat se honge. Ek zaroori aur dilchasp update share karni thi: $topic. Tafseelat ke liye rabta farmayein!"
+            return@withContext "Salam! Umeed hai aap khairiyat se honge. Ek zaroori update share karni thi: $topic. Tafseelat ke liye rabta farmayein!"
         }
 
         val prompt = "Write a very attractive, warm, professional, and engaging WhatsApp message (in Roman Urdu / Urdu with polite emojis) about this topic: '$topic'. Keep it appealing, concise, and ready to send directly to friends, clients, or contacts. Do not add quotes."
-        return@withContext callGeminiSinglePrompt(apiKey, prompt)
-    }
-
-    private fun callGeminiSinglePrompt(apiKey: String, prompt: String): String {
-        val singleTurn = ArrayList<JSONObject>().apply {
-            add(JSONObject().apply {
-                put("role", "user")
-                put("parts", JSONArray().apply {
-                    put(JSONObject().apply { put("text", prompt) })
-                })
+        val singleTurn = listOf(JSONObject().apply {
+            put("role", "user")
+            put("parts", JSONArray().apply {
+                put(JSONObject().apply { put("text", prompt) })
             })
-        }
-        return callGeminiMultiTurnApi(apiKey, singleTurn)
+        })
+        return@withContext callWithModelFallback(apiKey, singleTurn)
     }
 
-    private fun callGeminiMultiTurnApi(apiKey: String, contentsList: List<JSONObject>): String {
+    private fun callWithModelFallback(apiKey: String, contentsList: List<JSONObject>): String {
+        val workingModel = getWorkingModel()
+        val modelsToTry = mutableListOf(workingModel)
+        for (m in CANDIDATE_MODELS) {
+            if (!modelsToTry.contains(m)) modelsToTry.add(m)
+        }
+
+        var lastError = "Gemini connect nahi ho saka."
+
+        for (model in modelsToTry) {
+            val response = executeRequest(apiKey, model, contentsList)
+            if (response.isSuccess) {
+                if (workingModel != model) {
+                    setWorkingModel(model)
+                    Log.i(TAG, "Switched working Gemini model to: $model")
+                }
+                return response.text
+            } else {
+                lastError = response.text
+                // If model was not found (404), try next candidate model!
+                if (response.httpCode == 404) {
+                    Log.w(TAG, "Model $model returned 404. Trying next fallback model...")
+                    continue
+                } else {
+                    // 400 (Bad Key), 403 (Quota), etc. - do not loop further
+                    break
+                }
+            }
+        }
+
+        return lastError
+    }
+
+    private data class ApiResponse(val isSuccess: Boolean, val httpCode: Int, val text: String)
+
+    private fun executeRequest(apiKey: String, model: String, contentsList: List<JSONObject>): ApiResponse {
         var conn: HttpURLConnection? = null
         try {
-            val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/$DEFAULT_MODEL:generateContent?key=$apiKey"
+            val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
             val url = URL(endpoint)
             conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
@@ -173,7 +221,7 @@ class GeminiBrainClient(private val context: Context) {
                 conn.errorStream
             }
 
-            val responseStr = BufferedReader(InputStreamReader(stream)).use { it.readText() }
+            val responseStr = stream?.let { BufferedReader(InputStreamReader(it)).use { r -> r.readText() } } ?: ""
 
             if (responseCode == HttpURLConnection.HTTP_OK) {
                 val json = JSONObject(responseStr)
@@ -184,16 +232,23 @@ class GeminiBrainClient(private val context: Context) {
                     val parts = content?.optJSONArray("parts")
                     if (parts != null && parts.length() > 0) {
                         val text = parts.getJSONObject(0).optString("text", "Koi jawab nahi mila.")
-                        // Clean markdown asterisks for smooth TTS
-                        return text.replace("*", "").replace("#", "").trim()
+                        return ApiResponse(true, responseCode, text.replace("*", "").replace("#", "").trim())
                     }
                 }
-                return "Jawab samajh nahi aaya."
+                return ApiResponse(false, responseCode, "Jawab samajh nahi aaya.")
             } else {
-                return "Gemini API Error ($responseCode). API key check karein."
+                val parsedError = try {
+                    JSONObject(responseStr).optJSONObject("error")?.optString("message", "") ?: ""
+                } catch (e: Exception) {
+                    ""
+                }
+                val errorMsg = if (parsedError.isNotEmpty()) parsedError else "Gemini Error $responseCode"
+                Log.e(TAG, "Gemini Request failed on $model [$responseCode]: $errorMsg")
+                return ApiResponse(false, responseCode, errorMsg)
             }
         } catch (e: Exception) {
-            return "Internet ya Gemini se connect karne mein masla: ${e.message}"
+            Log.e(TAG, "Gemini network exception on $model: ${e.message}")
+            return ApiResponse(false, -1, "Internet connection issue: ${e.message}")
         } finally {
             conn?.disconnect()
         }

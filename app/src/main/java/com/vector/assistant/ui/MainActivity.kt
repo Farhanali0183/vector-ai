@@ -122,10 +122,22 @@ class MainActivity : AppCompatActivity() {
         binding.btnSaveGeminiKey.setOnClickListener {
             val key = binding.etGeminiApiKey.text?.toString()?.trim() ?: ""
             if (key.isNotEmpty()) {
-                geminiBrain.saveApiKey(key)
-                Toast.makeText(this, "Gemini Pro Connected Successfully!", Toast.LENGTH_SHORT).show()
-                updateGeminiStatusUI(geminiBrain)
-                binding.etGeminiApiKey.setText("")
+                binding.btnSaveGeminiKey.isEnabled = false
+                binding.btnSaveGeminiKey.text = "Verifying & Connecting Key..."
+                scope.launch {
+                    geminiBrain.saveApiKey(key)
+                    val testAnswer = geminiBrain.askGemini("Salam")
+                    binding.btnSaveGeminiKey.isEnabled = true
+                    if (!testAnswer.contains("Error", ignoreCase = true) && !testAnswer.contains("issue", ignoreCase = true)) {
+                        Toast.makeText(this@MainActivity, "Gemini Connected! (${geminiBrain.getWorkingModel()})", Toast.LENGTH_SHORT).show()
+                        appendLog("Gemini Verified: Connected with model ${geminiBrain.getWorkingModel()}")
+                    } else {
+                        Toast.makeText(this@MainActivity, "Gemini: $testAnswer", Toast.LENGTH_LONG).show()
+                        appendLog("Gemini Status: $testAnswer")
+                    }
+                    updateGeminiStatusUI(geminiBrain)
+                    binding.etGeminiApiKey.setText("")
+                }
             } else {
                 Toast.makeText(this, "Please enter a valid API key", Toast.LENGTH_SHORT).show()
             }
@@ -151,7 +163,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateGeminiStatusUI(gemini: com.vector.assistant.ai.GeminiBrainClient) {
         if (gemini.isConnected()) {
-            binding.tvGeminiStatus.text = "Status: ACTIVE & CONNECTED (Gemini Pro Intelligence Enabled!)"
+            binding.tvGeminiStatus.text = "Status: ACTIVE & CONNECTED (${gemini.getWorkingModel()})"
             binding.tvGeminiStatus.setTextColor(ContextCompat.getColor(this, R.color.neon_green))
             binding.btnSaveGeminiKey.text = "UPDATE GEMINI PRO KEY"
         } else {
