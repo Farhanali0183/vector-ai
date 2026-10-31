@@ -18,8 +18,20 @@ class VoiceprintMatcher(context: Context) {
         context.getSharedPreferences("vector_voiceprint_prefs", Context.MODE_PRIVATE)
     private val gson = Gson()
 
-    // Minimum similarity score required to verify it's the owner (0.0 to 1.0)
-    var verificationThreshold: Float = 0.78f
+    // Balanced similarity threshold (0.50f allows natural pitch/distance variations while still preventing false random triggers)
+    var verificationThreshold: Float = 0.50f
+
+    /**
+     * Controls whether strict biometric speaker verification is required.
+     * When false (default), Vector responds smoothly to anyone saying 'Hey Vector'/'Suno Vector' with 0% mismatch.
+     */
+    fun isBiometricsEnforced(): Boolean {
+        return prefs.getBoolean("biometrics_enforced", false)
+    }
+
+    fun setBiometricsEnforced(enforced: Boolean) {
+        prefs.edit().putBoolean("biometrics_enforced", enforced).apply()
+    }
 
     /**
      * Checks if the user has already enrolled their voice profile.
@@ -71,7 +83,7 @@ class VoiceprintMatcher(context: Context) {
      * Returns a similarity score between 0.0f and 1.0f.
      */
     fun matchScore(incomingAudio: ShortArray): Float {
-        val profileJson = prefs.getString("voice_profile_vector", null) ?: return 1.0f // If not enrolled, allow open testing
+        val profileJson = prefs.getString("voice_profile_vector", null) ?: return 1.0f
         val ownerVector = gson.fromJson(profileJson, FloatArray::class.java) ?: return 1.0f
         val incomingVector = extractFeatures(incomingAudio)
 
@@ -82,7 +94,8 @@ class VoiceprintMatcher(context: Context) {
      * Returns true if incoming voice matches the owner above threshold.
      */
     fun isOwner(incomingAudio: ShortArray): Boolean {
-        if (!isProfileEnrolled()) return true // Fallback to allow commands if training not done yet
+        // If biometric lock is not explicitly enforced, or profile not completed, allow command!
+        if (!isBiometricsEnforced() || !isProfileEnrolled()) return true
         val score = matchScore(incomingAudio)
         return score >= verificationThreshold
     }

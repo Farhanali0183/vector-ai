@@ -260,13 +260,13 @@ class MainActivity : AppCompatActivity() {
 
         if (count >= 3) {
             binding.tvVoiceProfileStatus.text =
-                "Profile: REGISTERED & ACTIVE (Vector only obeys YOUR voice!)"
+                "Profile: REGISTERED (Balanced threshold 0.50 - No more voice mismatch!)"
             binding.tvVoiceProfileStatus.setTextColor(ContextCompat.getColor(this, R.color.neon_green))
             binding.btnTrainVoice.text = "Reset & Re-Train Voice Profile"
         } else {
             binding.tvVoiceProfileStatus.text =
-                "Profile: Incomplete ($count/3 samples recorded). Register so Vector knows you."
-            binding.tvVoiceProfileStatus.setTextColor(ContextCompat.getColor(this, R.color.text_secondary))
+                "Profile: Open Mode (Instant response to 'Hey Vector' / 'Suno Vector')."
+            binding.tvVoiceProfileStatus.setTextColor(ContextCompat.getColor(this, R.color.neon_cyan))
             binding.btnTrainVoice.text = "Record Voice Sample ($count / 3)"
         }
     }

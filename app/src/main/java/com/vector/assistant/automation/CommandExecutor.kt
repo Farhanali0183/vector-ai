@@ -52,22 +52,22 @@ class CommandExecutor(
 
         when {
             // 1. Bulk / Multi-Contact WhatsApp Campaign ("In sab ko WhatsApp per attractive message bhejo: Ali, Hamza, Bilal ke Sale shuru ho gayi hai")
-            (command.contains("in sab") || command.contains("sab ko") || command.contains("multi")) && command.contains("whatsapp") -> {
+            (command.contains("in sab") || command.contains("sab ko") || command.contains("multi") || command.contains("campaign")) && command.contains("whatsapp") -> {
                 handleMultiContactWhatsApp(rawText)
             }
 
-            // 2. Single WhatsApp Message ("WhatsApp per Ali ko msg karo ke main aa raha hoon")
-            command.contains("whatsapp") && (command.contains("msg") || command.contains("message")) -> {
+            // 2. Single WhatsApp Message ("WhatsApp per Ali ko msg karo ke main aa raha hoon", "WhatsApp karo Ali ko")
+            command.contains("whatsapp") && (command.contains("msg") || command.contains("message") || command.contains("bhejo") || command.contains("karo") || command.contains("send")) -> {
                 handleSingleWhatsAppMessage(command)
             }
 
             // 3. Save Contact ("Save number Ali 03001234567" / "Number save karo Ali 03001234567")
-            command.contains("save number") || command.contains("number save") || command.contains("contact save") -> {
+            command.contains("save number") || command.contains("number save") || command.contains("contact save") || command.contains("save contact") || (command.contains("save") && command.any { it.isDigit() }) -> {
                 handleSaveContact(rawText)
             }
 
-            // 4. Call History ("Recent calls", "Kal kis kis ko call ki thi", "Call history")
-            command.contains("call history") || command.contains("recent call") || command.contains("kis ko call ki") -> {
+            // 4. Call History ("Recent calls", "Kal kis kis ki call aayi", "Call history")
+            command.contains("call history") || command.contains("recent call") || command.contains("kis ko call") || command.contains("kis ki call") || command.contains("last call") -> {
                 handleCallHistory()
             }
 
@@ -76,62 +76,71 @@ class CommandExecutor(
                 handleVipContactSetup(command)
             }
 
-            // 6. YouTube Search & Play ("YouTube per search karo Imran Khan", "Play on YouTube")
+            // 6. YouTube Search & Play ("YouTube per search karo Imran Khan", "Play on YouTube", "YouTube chalao")
             command.contains("youtube") -> {
                 handleYouTube(command)
             }
 
-            // 7. Direct Phone Call ("Call Ali", "Ali ko call lagao")
-            command.startsWith("call ") || command.contains("ko call") || command.contains("call lagao") -> {
-                handleCall(command)
-            }
-
-            // 8. Flashlight ("Torch chalao", "Torch band karo", "Flashlight on")
-            command.contains("torch on") || command.contains("flashlight on") || command.contains("torch chalao") -> {
-                toggleTorch(true)
-            }
-            command.contains("torch off") || command.contains("flashlight off") || command.contains("torch band") -> {
+            // 7. Flashlight OFF ("Torch band karo", "Torch off", "Flashlight off", "Batti bujha do")
+            (command.contains("torch") || command.contains("flashlight") || command.contains("batti")) &&
+                (command.contains("off") || command.contains("band") || command.contains("bujha") || command.contains("stop")) -> {
                 toggleTorch(false)
             }
 
-            // 9. Volume Control
-            command.contains("volume up") || command.contains("awaaz barhao") -> {
-                audioManager?.adjustStreamVolume(AudioManager.STREAM_RING, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
-                speaker.speak("Volume barha diya gaya hai")
-                onLog("Action: Volume increased")
+            // 8. Flashlight ON ("Torch chalao", "Torch on", "Torch jalao", "Flashlight on", "Batti on", "Torch chalu karo")
+            (command.contains("torch") || command.contains("flashlight") || command.contains("batti")) &&
+                (command.contains("on") || command.contains("chala") || command.contains("chalu") || command.contains("jala") || command.contains("start") || command.contains("khol")) -> {
+                toggleTorch(true)
             }
-            command.contains("volume down") || command.contains("awaaz kam") -> {
-                audioManager?.adjustStreamVolume(AudioManager.STREAM_RING, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
-                speaker.speak("Volume kam kar diya gaya hai")
-                onLog("Action: Volume decreased")
+            command == "torch" || command == "flashlight" -> {
+                toggleTorch(!isTorchOn)
             }
 
-            // 10. Open Apps ("Open Instagram", "Camera kholo")
-            command.startsWith("open ") || command.contains("kholo") -> {
-                handleOpenApp(command)
-            }
-
-            // 11. Time & Battery Status
-            command.contains("time") -> {
+            // 9. Time & Clock ("Time kya hua", "Kitne baje hain", "Waqt kya hai", "Time")
+            command.contains("time") || command.contains("waqt") || command.contains("baje") -> {
                 val currentTime = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date())
                 speaker.speak("Abhi waqt $currentTime hua hai")
                 onLog("Action: Spoke time ($currentTime)")
             }
-            command.contains("battery") -> {
+
+            // 10. Battery Status ("Battery kitni hai", "Battery status", "Charging kitni hai")
+            command.contains("battery") || command.contains("charging") || command.contains("charge") -> {
                 val batteryManager = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
                 val level = batteryManager?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
                 speaker.speak("Aapke phone ki battery $level percent hai")
                 onLog("Action: Battery level $level%")
             }
 
-            // 12. Navigation Gestures
-            command.contains("home") -> {
+            // 11. Volume Control ("Volume up", "Awaaz barhao", "Awaaz tez", "Volume down", "Awaaz kam")
+            command.contains("volume up") || command.contains("awaaz barhao") || command.contains("awaaz tez") || command.contains("volume barhao") || command.contains("sound barhao") -> {
+                audioManager?.adjustStreamVolume(AudioManager.STREAM_RING, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
+                speaker.speak("Volume barha diya gaya hai")
+                onLog("Action: Volume increased")
+            }
+            command.contains("volume down") || command.contains("awaaz kam") || command.contains("volume kam") || command.contains("sound kam") || command.contains("mute") || command.contains("silent") -> {
+                audioManager?.adjustStreamVolume(AudioManager.STREAM_RING, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
+                speaker.speak("Volume kam kar diya gaya hai")
+                onLog("Action: Volume decreased")
+            }
+
+            // 12. Direct Phone Call ("Call Ali", "Ali ko call lagao", "Ali ko phone karo", "Ali ko call milao")
+            command.startsWith("call ") || command.contains("ko call") || command.contains("call lagao") || command.contains("call milao") || command.contains("call karo") || command.contains("phone milao") || command.contains("dial ") -> {
+                handleCall(command)
+            }
+
+            // 13. Open Apps ("Open Instagram", "Camera kholo", "WhatsApp open")
+            command.startsWith("open ") || command.contains("kholo") || command.contains("chalao") || command.startsWith("launch ") -> {
+                handleOpenApp(command)
+            }
+
+            // 14. Navigation Gestures ("Go Home", "Home screen", "Bahar aao")
+            command.contains("home") || command.contains("bahar") -> {
                 VectorAccessibilityService.instance?.goHome()
                 speaker.speak("Home screen open ho gayi")
                 onLog("Action: Accessibility HOME")
             }
 
-            // 13. Conversational AI Brain powered by Google Gemini Pro
+            // 15. Conversational AI Brain powered by Google Gemini Pro
             else -> {
                 handleGeminiAIConversation(rawText)
             }
@@ -409,10 +418,20 @@ class CommandExecutor(
 
     private fun handleCall(command: String) {
         val targetName = command
-            .replace("call", "")
             .replace("ko call milao", "")
+            .replace("ko call lagao", "")
+            .replace("ko call karo", "")
             .replace("ko call", "")
+            .replace("call milao", "")
             .replace("call lagao", "")
+            .replace("call karo", "")
+            .replace("phone milao", "")
+            .replace("phone karo", "")
+            .replace("ko phone", "")
+            .replace("call", "")
+            .replace("dial", "")
+            .replace("phone", "")
+            .replace("ko", "")
             .trim()
 
         if (targetName.isEmpty()) {

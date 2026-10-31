@@ -61,6 +61,7 @@ class AudioRecorderManager(
                 val voiceBuffer = ArrayList<Short>()
                 var isSpeechActive = false
                 var silenceFrames = 0
+                var noiseFloor = 180.0
 
                 while (isActive && isRunning) {
                     val readCount = audioRecord?.read(shortBuffer, 0, shortBuffer.size) ?: 0
@@ -68,8 +69,15 @@ class AudioRecorderManager(
                         val frame = shortBuffer.copyOf(readCount)
                         val energy = calculateRMS(frame)
 
-                        // Simple energy threshold for speech activity detection (VAD)
-                        if (energy > 500) {
+                        // Dynamically adapt to ambient room noise
+                        if (!isSpeechActive) {
+                            noiseFloor = (noiseFloor * 0.96) + (energy * 0.04)
+                        }
+
+                        // Adaptive speech threshold: at least 250, or 1.6x ambient noise
+                        val speechThreshold = maxOf(250.0, noiseFloor * 1.6)
+
+                        if (energy > speechThreshold) {
                             isSpeechActive = true
                             silenceFrames = 0
                             for (s in frame) voiceBuffer.add(s)
@@ -77,22 +85,23 @@ class AudioRecorderManager(
                             silenceFrames++
                             for (s in frame) voiceBuffer.add(s)
 
-                            // 15 frames of silence (~1 second) = end of utterance
-                            if (silenceFrames > 15 || voiceBuffer.size > 48000) {
+                            // 8 frames of silence (~500ms) = quick wake up without long delay
+                            if (silenceFrames >= 8 || voiceBuffer.size > 40000) {
                                 val completeUtterance = voiceBuffer.toShortArray()
                                 voiceBuffer.clear()
                                 isSpeechActive = false
+                                silenceFrames = 0
 
-                                // 1. Check Voice Biometrics (Speaker Recognition)
-                                val isOwner = matcher.isOwner(completeUtterance)
-                                val score = matcher.matchScore(completeUtterance)
+                                // Minimum 0.35s of voice to avoid accidental clicks
+                                if (completeUtterance.size >= 5600) {
+                                    val isOwner = matcher.isOwner(completeUtterance)
+                                    val score = matcher.matchScore(completeUtterance)
 
-                                if (isOwner) {
-                                    // Verified Owner! Trigger wake word & command
-                                    onWakeWordDetected(completeUtterance)
-                                } else {
-                                    // Ignored! Voice does not match owner
-                                    onVoiceRejected(score)
+                                    if (isOwner) {
+                                        onWakeWordDetected(completeUtterance)
+                                    } else {
+                                        onVoiceRejected(score)
+                                    }
                                 }
                             }
                         }
