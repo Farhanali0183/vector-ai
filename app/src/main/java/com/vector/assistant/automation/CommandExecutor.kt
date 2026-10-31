@@ -55,19 +55,23 @@ class CommandExecutor(
         geminiBrain.clearConversationHistory()
     }
 
+    fun startContinuousChat() {
+        isContinuousChatActive = true
+        geminiBrain.clearConversationHistory()
+        onLog("Live Chat: Continuous conversation ACTIVE (No 'Hey Vector' needed!)")
+        speaker.speak("Guftugu shuru ho gayi hai boss. Ab aap bina Hey Vector bole lagatar baat kar sakte hain.") {
+            onContinuousChatNextTurn?.invoke()
+        }
+    }
+
     fun processCommand(rawText: String) {
         val command = rawText.lowercase().trim()
         onLog("Order Received: \"$rawText\"")
 
         when {
-            // A. Start Continuous Live Chat ("Guftugu shuru karo", "Live chat start", "Baatein karo")
-            command.contains("guftugu shuru") || command.contains("live chat start") || command.contains("baat cheet shuru") || command.contains("continuous chat") || command.contains("baatein karo") -> {
-                isContinuousChatActive = true
-                geminiBrain.clearConversationHistory()
-                onLog("Live Chat: Continuous conversation ACTIVE (No 'Hey Vector' needed!)")
-                speaker.speak("Guftugu shuru ho gayi hai boss. Ab aap bina Hey Vector bole lagatar baat kar sakte hain.") {
-                    onContinuousChatNextTurn?.invoke()
-                }
+            // A. Start Continuous Live Chat ("Long chat", "Live chat start", "Guftugu shuru karo", "Baatein karo")
+            command.contains("long chat") || command.contains("live chat") || command.contains("chat shuru") || command.contains("guftugu shuru") || command.contains("baat cheet") || command.contains("baatein karo") || command.contains("baat karo") || command.contains("start chat") || command.contains("continuous") || command.contains("guftugu") -> {
+                startContinuousChat()
             }
 
             // B. Stop Continuous Live Chat ("Chat band karo", "Guftugu khatam", "Stop chat", "Alvida", "Bye", "Bas theek hai")
@@ -77,14 +81,14 @@ class CommandExecutor(
                 speaker.speak("Theek hai boss, continuous chat band ho gayi hai. Normal mode active hai.")
             }
 
-            // C. Long-Term Memory Save ("Yaad rakho mera office 9 baje hai", "Remember that my favourite food is Biryani")
-            command.startsWith("yaad rakho") || command.startsWith("remember") || command.contains("yaad rakhna") || command.contains("yaad rakh lo") -> {
-                handleSaveMemory(rawText)
+            // C. Long-Term Memory Recall ("Memory yaad rakhte ho", "Kya yaad hai", "Meri memories batao", "What do you remember")
+            command.contains("kya yaad") || command.contains("meri memories") || command.contains("what do you remember") || command.contains("kya yaad rakha") || command.contains("yaad rakhte ho") || command.contains("kuch yaad hai") -> {
+                handleRecallMemories()
             }
 
-            // D. Long-Term Memory Recall ("Kya yaad hai", "Meri memories batao", "What do you remember")
-            command.contains("kya yaad hai") || command.contains("meri memories") || command.contains("what do you remember") || command.contains("kya yaad rakha") -> {
-                handleRecallMemories()
+            // D. Long-Term Memory Save ("Yaad rakho mera office 9 baje hai", "Remember that my favourite food is Biryani")
+            command.startsWith("yaad") || command.startsWith("remember") || command.contains("yaad rakhna") || command.contains("yaad rakh lo") || command.contains("yaad rakho") -> {
+                handleSaveMemory(rawText)
             }
 
             // E. Clear All Memories ("Memories clear karo", "Sab bhool jao", "Clear memories")

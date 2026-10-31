@@ -36,6 +36,7 @@ class VectorVoiceService : Service() {
         const val ACTION_START = "ACTION_START_VECTOR"
         const val ACTION_STOP = "ACTION_STOP_VECTOR"
         const val ACTION_TRIGGER_LISTEN = "ACTION_TRIGGER_LISTEN"
+        const val ACTION_TOGGLE_CONTINUOUS = "ACTION_TOGGLE_CONTINUOUS"
         const val CHANNEL_ID = "vector_voice_channel"
         const val NOTIFICATION_ID = 1001
 
@@ -44,6 +45,9 @@ class VectorVoiceService : Service() {
 
         var isServiceRunning = false
             private set
+
+        var isContinuousChatActive = false
+            internal set
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
@@ -115,6 +119,22 @@ class VectorVoiceService : Service() {
                 }
                 triggerCommandListening()
             }
+            ACTION_TOGGLE_CONTINUOUS -> {
+                if (!isServiceRunning) {
+                    startForeground(NOTIFICATION_ID, buildNotification())
+                    isServiceRunning = true
+                }
+                if (commandExecutor.isContinuousChatActive) {
+                    commandExecutor.stopContinuousChat()
+                    isContinuousChatActive = false
+                    speaker.speak("Continuous chat band ho gayi hai.")
+                    broadcastLog("Live Chat: Switched OFF")
+                    resumeWakeListener()
+                } else {
+                    isContinuousChatActive = true
+                    commandExecutor.startContinuousChat()
+                }
+            }
             else -> {
                 startForeground(NOTIFICATION_ID, buildNotification())
                 isServiceRunning = true
@@ -135,7 +155,20 @@ class VectorVoiceService : Service() {
         if (isRecognizingCommand) return
         isRecognizingCommand = true
 
-        // 1. Pause raw audio recorder so it doesn't conflict with microphone
+        // 1. Wake screen if off so user sees Vector is awake and recognizer gets priority
+        try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            @Suppress("DEPRECATION")
+            val screenWakeLock = powerManager.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.ON_AFTER_RELEASE,
+                "VectorAssistant::ScreenWakeLock"
+            )
+            screenWakeLock.acquire(8000L)
+        } catch (e: Exception) {
+            // Ignore
+        }
+
+        // 2. Pause raw audio recorder so it doesn't conflict with microphone
         audioRecorderManager.stopListening()
 
         var recognitionStarted = false

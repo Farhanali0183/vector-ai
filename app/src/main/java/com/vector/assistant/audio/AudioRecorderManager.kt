@@ -40,13 +40,23 @@ class AudioRecorderManager(
         if (isRunning) return
 
         try {
-            audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                sampleRate,
-                channelConfig,
-                audioFormat,
-                bufferSize
+            val audioSources = intArrayOf(
+                MediaRecorder.AudioSource.MIC,
+                MediaRecorder.AudioSource.VOICE_RECOGNITION
             )
+            for (src in audioSources) {
+                try {
+                    val record = AudioRecord(src, sampleRate, channelConfig, audioFormat, bufferSize)
+                    if (record.state == AudioRecord.STATE_INITIALIZED) {
+                        audioRecord = record
+                        break
+                    } else {
+                        record.release()
+                    }
+                } catch (e: Exception) {
+                    // Try next source
+                }
+            }
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
                 Log.e("AudioRecorderManager", "AudioRecord initialization failed!")

@@ -148,9 +148,62 @@ class GeminiBrainClient(private val context: Context) {
         return@withContext callWithModelFallback(apiKey, singleTurn)
     }
 
+    fun discoverActiveModelFromGoogle(apiKey: String): String? {
+        var conn: HttpURLConnection? = null
+        try {
+            val url = URL("https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey")
+            conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 8000
+                readTimeout = 8000
+            }
+            if (conn.responseCode == 200) {
+                val responseStr = BufferedReader(InputStreamReader(conn.inputStream)).use { it.readText() }
+                val json = JSONObject(responseStr)
+                val models = json.optJSONArray("models")
+                if (models != null && models.length() > 0) {
+                    // 1. Look for flash model that supports generateContent
+                    for (i in 0 until models.length()) {
+                        val m = models.getJSONObject(i)
+                        val name = m.optString("name", "")
+                        val methods = m.optJSONArray("supportedGenerationMethods")
+                        val supportsGen = methods != null && (0 until methods.length()).any { methods.optString(it) == "generateContent" }
+                        if (supportsGen && name.contains("flash", ignoreCase = true)) {
+                            return name.removePrefix("models/")
+                        }
+                    }
+                    // 2. Fallback to any model supporting generateContent
+                    for (i in 0 until models.length()) {
+                        val m = models.getJSONObject(i)
+                        val name = m.optString("name", "")
+                        val methods = m.optJSONArray("supportedGenerationMethods")
+                        val supportsGen = methods != null && (0 until methods.length()).any { methods.optString(it) == "generateContent" }
+                        if (supportsGen) {
+                            return name.removePrefix("models/")
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Dynamic model discovery failed: ${e.message}")
+        } finally {
+            conn?.disconnect()
+        }
+        return null
+    }
+
     private fun callWithModelFallback(apiKey: String, contentsList: List<JSONObject>): String {
-        val workingModel = getWorkingModel()
-        val modelsToTry = mutableListOf(workingModel)
+        var workingModel = prefs.getString(KEY_WORKING_MODEL, null)
+        if (workingModel.isNullOrBlank()) {
+            val discovered = discoverActiveModelFromGoogle(apiKey)
+            if (!discovered.isNullOrBlank()) {
+                workingModel = discovered
+                setWorkingModel(discovered)
+            }
+        }
+
+        val modelsToTry = mutableListOf<String>()
+        if (!workingModel.isNullOrBlank()) modelsToTry.add(workingModel)
         for (m in CANDIDATE_MODELS) {
             if (!modelsToTry.contains(m)) modelsToTry.add(m)
         }
@@ -160,21 +213,27 @@ class GeminiBrainClient(private val context: Context) {
         for (model in modelsToTry) {
             val response = executeRequest(apiKey, model, contentsList)
             if (response.isSuccess) {
-                if (workingModel != model) {
-                    setWorkingModel(model)
-                    Log.i(TAG, "Switched working Gemini model to: $model")
-                }
+                setWorkingModel(model)
+                Log.i(TAG, "Using working Gemini model: $model")
                 return response.text
             } else {
                 lastError = response.text
-                // If model was not found (404), try next candidate model!
                 if (response.httpCode == 404) {
-                    Log.w(TAG, "Model $model returned 404. Trying next fallback model...")
+                    Log.w(TAG, "Model $model returned 404. Trying next fallback...")
                     continue
                 } else {
-                    // 400 (Bad Key), 403 (Quota), etc. - do not loop further
                     break
                 }
+            }
+        }
+
+        // If candidates failed with 404, query Google's live model catalog directly!
+        val liveModel = discoverActiveModelFromGoogle(apiKey)
+        if (!liveModel.isNullOrBlank() && !modelsToTry.contains(liveModel)) {
+            val finalResp = executeRequest(apiKey, liveModel, contentsList)
+            if (finalResp.isSuccess) {
+                setWorkingModel(liveModel)
+                return finalResp.text
             }
         }
 

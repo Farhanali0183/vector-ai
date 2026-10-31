@@ -101,6 +101,18 @@
                 android:textColor="@color/bg_dark"
                 android:textStyle="bold"
                 app:cornerRadius="14dp" />
+
+            <!-- Continuous Live Chat Toggle Button -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnToggleContinuousChat"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:layout_marginTop="10dp"
+                android:backgroundTint="@color/neon_purple"
+                android:text="💬 START CONTINUOUS LIVE CHAT (HANDS-FREE)"
+                android:textColor="@color/text_primary"
+                android:textStyle="bold"
+                app:cornerRadius="14dp" />
         </LinearLayout>
 
         <!-- Speaker Recognition & Voice Training Card -->

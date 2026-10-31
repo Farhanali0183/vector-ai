@@ -110,6 +110,17 @@ class MainActivity : AppCompatActivity() {
             appendLog("Tapped 'Suno Vector'! Listening for command...")
         }
 
+        // Hands-Free Continuous Live Chat Button
+        binding.btnToggleContinuousChat.setOnClickListener {
+            val intent = Intent(this, VectorVoiceService::class.java).apply {
+                action = VectorVoiceService.ACTION_TOGGLE_CONTINUOUS
+            }
+            ContextCompat.startForegroundService(this, intent)
+            binding.root.postDelayed({
+                updateContinuousChatButtonUI()
+            }, 300)
+        }
+
         // Voice Training Button
         binding.btnTrainVoice.setOnClickListener {
             recordVoiceSampleForTraining()
@@ -206,6 +217,20 @@ class MainActivity : AppCompatActivity() {
             binding.btnToggleService.backgroundTintList =
                 ContextCompat.getColorStateList(this, R.color.neon_cyan)
             binding.tvServiceState.text = "Vector is currently sleeping. Tap below to wake up."
+        }
+        updateContinuousChatButtonUI()
+    }
+
+    private fun updateContinuousChatButtonUI() {
+        val isActive = VectorVoiceService.isContinuousChatActive
+        if (isActive) {
+            binding.btnToggleContinuousChat.text = "STOP CONTINUOUS LIVE CHAT (ACTIVE)"
+            binding.btnToggleContinuousChat.backgroundTintList =
+                ContextCompat.getColorStateList(this, R.color.neon_red)
+        } else {
+            binding.btnToggleContinuousChat.text = "START CONTINUOUS LIVE CHAT (HANDS-FREE)"
+            binding.btnToggleContinuousChat.backgroundTintList =
+                ContextCompat.getColorStateList(this, R.color.neon_purple)
         }
     }
 
