@@ -95,6 +95,16 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Tap on "Suno Vector" glowing orb to talk directly
+        binding.pulseContainer.setOnClickListener {
+            val intent = Intent(this, VectorVoiceService::class.java).apply {
+                action = VectorVoiceService.ACTION_TRIGGER_LISTEN
+            }
+            ContextCompat.startForegroundService(this, intent)
+            updateServiceStateUI(true)
+            appendLog("Tapped 'Suno Vector'! Listening for command...")
+        }
+
         // Voice Training Button
         binding.btnTrainVoice.setOnClickListener {
             recordVoiceSampleForTraining()

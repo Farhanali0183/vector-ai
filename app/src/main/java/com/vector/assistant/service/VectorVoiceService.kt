@@ -35,6 +35,7 @@ class VectorVoiceService : Service() {
     companion object {
         const val ACTION_START = "ACTION_START_VECTOR"
         const val ACTION_STOP = "ACTION_STOP_VECTOR"
+        const val ACTION_TRIGGER_LISTEN = "ACTION_TRIGGER_LISTEN"
         const val CHANNEL_ID = "vector_voice_channel"
         const val NOTIFICATION_ID = 1001
 
@@ -52,6 +53,7 @@ class VectorVoiceService : Service() {
     private lateinit var commandExecutor: CommandExecutor
     private var speechRecognizer: SpeechRecognizer? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var isRecognizingCommand = false
 
     override fun onCreate() {
         super.onCreate()
@@ -77,9 +79,9 @@ class VectorVoiceService : Service() {
         audioRecorderManager = AudioRecorderManager(
             matcher = voiceprintMatcher,
             onWakeWordDetected = { pcm ->
-                broadcastLog("Owner Voice Verified! Listening for command...")
+                broadcastLog("Owner Voice Verified! Waking up...")
                 mainHandler.post {
-                    startSpeechRecognition()
+                    triggerCommandListening()
                 }
             },
             onVoiceRejected = { score ->
@@ -96,6 +98,13 @@ class VectorVoiceService : Service() {
                 stopForegroundService()
                 return START_NOT_STICKY
             }
+            ACTION_TRIGGER_LISTEN -> {
+                if (!isServiceRunning) {
+                    startForeground(NOTIFICATION_ID, buildNotification())
+                    isServiceRunning = true
+                }
+                triggerCommandListening()
+            }
             else -> {
                 startForeground(NOTIFICATION_ID, buildNotification())
                 isServiceRunning = true
@@ -106,36 +115,102 @@ class VectorVoiceService : Service() {
         return START_STICKY
     }
 
+    /**
+     * Correct sequence:
+     * 1. Pause raw audio recorder.
+     * 2. Speak "Yes boss?".
+     * 3. Once TTS completes speaking, start SpeechRecognizer to capture the command!
+     */
+    private fun triggerCommandListening() {
+        if (isRecognizingCommand) return
+        isRecognizingCommand = true
+
+        // 1. Pause raw audio recorder so it doesn't conflict with microphone
+        audioRecorderManager.stopListening()
+
+        var recognitionStarted = false
+        val launchRecognizer = {
+            if (!recognitionStarted) {
+                recognitionStarted = true
+                mainHandler.postDelayed({
+                    startSpeechRecognition()
+                }, 300) // Small delay to clear speaker audio from the room
+            }
+        }
+
+        // Safety fallback: if TTS onDone doesn't fire within 2.5 seconds, start anyway
+        val fallbackRunnable = Runnable { launchRecognizer() }
+        mainHandler.postDelayed(fallbackRunnable, 2500)
+
+        speaker.speak("Yes boss?") {
+            mainHandler.removeCallbacks(fallbackRunnable)
+            launchRecognizer()
+        }
+    }
+
     private fun startSpeechRecognition() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             broadcastLog("Speech recognition not available on this device.")
+            isRecognizingCommand = false
+            resumeWakeListener()
             return
         }
 
-        speechRecognizer?.destroy()
+        try {
+            speechRecognizer?.destroy()
+        } catch (e: Exception) {
+            // Ignore
+        }
+
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
             setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {
-                    speaker.speak("Yes boss?")
+                    broadcastLog("🎤 Listening for your command now... (e.g. 'Torch on', 'Time', 'Gemini...')")
                 }
-                override fun onBeginningOfSpeech() {}
+
+                override fun onBeginningOfSpeech() {
+                    broadcastLog("🗣️ Hearing voice...")
+                }
+
                 override fun onRmsChanged(rmsdB: Float) {}
                 override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() {}
+                override fun onEndOfSpeech() {
+                    broadcastLog("Processing voice command...")
+                }
+
                 override fun onError(error: Int) {
-                    Log.d("VectorVoiceService", "Speech recognition error: $error")
-                    // Resume background audio listener
-                    audioRecorderManager.startListening()
+                    val errorMsg = when (error) {
+                        SpeechRecognizer.ERROR_AUDIO -> "Audio recording issue"
+                        SpeechRecognizer.ERROR_CLIENT -> "Client app issue"
+                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Missing microphone permission"
+                        SpeechRecognizer.ERROR_NETWORK -> "Network issue"
+                        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timeout"
+                        SpeechRecognizer.ERROR_NO_MATCH -> "No speech recognized"
+                        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Speech recognizer busy"
+                        SpeechRecognizer.ERROR_SERVER -> "Server error"
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech heard (timeout)"
+                        else -> "Code $error"
+                    }
+                    Log.d("VectorVoiceService", "Speech recognition ended: $errorMsg ($error)")
+                    broadcastLog("Recognition: $errorMsg. Ready for next command.")
+                    isRecognizingCommand = false
+                    resumeWakeListener()
                 }
 
                 override fun onResults(results: Bundle?) {
                     val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    val recognized = matches?.firstOrNull() ?: ""
+                    val recognized = matches?.firstOrNull()?.trim() ?: ""
                     if (recognized.isNotEmpty()) {
+                        broadcastLog("✅ Command heard: \"$recognized\"")
                         commandExecutor.processCommand(recognized)
+                    } else {
+                        broadcastLog("⚠️ Voice not clear. Please try again.")
                     }
-                    // Resume listening for the next wake word
-                    audioRecorderManager.startListening()
+                    isRecognizingCommand = false
+                    // Resume listening for the next wake word after brief delay
+                    mainHandler.postDelayed({
+                        resumeWakeListener()
+                    }, 1200)
                 }
 
                 override fun onPartialResults(partialResults: Bundle?) {}
@@ -145,13 +220,28 @@ class VectorVoiceService : Service() {
 
         val recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toString())
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+            val lang = Locale.getDefault().toLanguageTag()
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, lang)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 2000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
         }
 
-        // Pause raw audio recorder during high-level recognition
-        audioRecorderManager.stopListening()
-        speechRecognizer?.startListening(recognizerIntent)
+        try {
+            speechRecognizer?.startListening(recognizerIntent)
+        } catch (e: Exception) {
+            broadcastLog("Failed to start speech listener: ${e.message}")
+            isRecognizingCommand = false
+            resumeWakeListener()
+        }
+    }
+
+    private fun resumeWakeListener() {
+        if (isServiceRunning && !audioRecorderManager.isRunning) {
+            audioRecorderManager.startListening()
+        }
     }
 
     private fun broadcastLog(msg: String) {

@@ -33,21 +33,29 @@ class VoiceSpeaker(context: Context, private val onInitCompleted: (() -> Unit)? 
     }
 
     fun speak(text: String, onDone: (() -> Unit)? = null) {
-        if (!isReady || tts == null) return
+        if (!isReady || tts == null) {
+            onDone?.invoke()
+            return
+        }
 
+        val utteranceId = "vector_speech_${System.currentTimeMillis()}"
         if (onDone != null) {
             tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) {}
-                override fun onDone(utteranceId: String?) {
-                    onDone()
+                override fun onStart(id: String?) {}
+                override fun onDone(id: String?) {
+                    if (id == utteranceId) {
+                        onDone()
+                    }
                 }
-                override fun onError(utteranceId: String?) {
-                    onDone()
+                override fun onError(id: String?) {
+                    if (id == utteranceId) {
+                        onDone()
+                    }
                 }
             })
         }
 
-        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "vector_speech_${System.currentTimeMillis()}")
+        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
     }
 
     fun shutdown() {
