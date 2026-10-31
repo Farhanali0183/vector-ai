@@ -71,9 +71,19 @@ class VectorVoiceService : Service() {
         // 2. Initialize Voice & Automation Components
         voiceprintMatcher = VoiceprintMatcher(this)
         speaker = VoiceSpeaker(this)
-        commandExecutor = CommandExecutor(this, speaker) { logMsg ->
-            broadcastLog(logMsg)
-        }
+        commandExecutor = CommandExecutor(
+            context = this,
+            speaker = speaker,
+            onLog = { logMsg -> broadcastLog(logMsg) },
+            onContinuousChatNextTurn = {
+                mainHandler.postDelayed({
+                    if (isServiceRunning && commandExecutor.isContinuousChatActive) {
+                        broadcastLog("🎙️ Continuous Live Chat: Aapki baat sun raha hoon... (Bolen!)")
+                        startSpeechRecognition()
+                    }
+                }, 400)
+            }
+        )
 
         // 3. Audio Stream Listener (Low-latency speaker verification)
         audioRecorderManager = AudioRecorderManager(
@@ -192,7 +202,14 @@ class VectorVoiceService : Service() {
                         else -> "Code $error"
                     }
                     Log.d("VectorVoiceService", "Speech recognition ended: $errorMsg ($error)")
-                    broadcastLog("Recognition: $errorMsg. Ready for next command.")
+                    broadcastLog("Recognition: $errorMsg.")
+
+                    if (commandExecutor.isContinuousChatActive) {
+                        // In continuous chat, if silence timeout occurred, exit continuous chat
+                        commandExecutor.stopContinuousChat()
+                        broadcastLog("Live Chat: Paused due to silence. Normal wake mode active.")
+                    }
+
                     isRecognizingCommand = false
                     resumeWakeListener()
                 }
@@ -207,10 +224,13 @@ class VectorVoiceService : Service() {
                         broadcastLog("⚠️ Voice not clear. Please try again.")
                     }
                     isRecognizingCommand = false
-                    // Resume listening for the next wake word after brief delay
-                    mainHandler.postDelayed({
-                        resumeWakeListener()
-                    }, 1200)
+
+                    // If NOT in continuous chat, resume listening for wake word
+                    if (!commandExecutor.isContinuousChatActive) {
+                        mainHandler.postDelayed({
+                            resumeWakeListener()
+                        }, 1200)
+                    }
                 }
 
                 override fun onPartialResults(partialResults: Bundle?) {}
@@ -239,7 +259,7 @@ class VectorVoiceService : Service() {
     }
 
     private fun resumeWakeListener() {
-        if (isServiceRunning && !audioRecorderManager.isRunning) {
+        if (isServiceRunning && !commandExecutor.isContinuousChatActive && !audioRecorderManager.isRunning) {
             audioRecorderManager.startListening()
         }
     }

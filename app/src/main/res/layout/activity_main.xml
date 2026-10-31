@@ -206,6 +206,15 @@
                 android:text="CONNECT GEMINI PRO"
                 android:textColor="@color/text_primary"
                 app:cornerRadius="10dp" />
+
+            <TextView
+                android:id="@+id/tvMemoriesStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="🧠 AI Memory: 0 facts remembered (Bol kar save karein: 'Yaad rakho mera blood group B hai')"
+                android:textColor="@color/neon_cyan"
+                android:textSize="12sp" />
         </LinearLayout>
 
         <!-- Permissions Health Check Card (Android 13 One-Tap) -->

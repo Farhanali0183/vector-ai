@@ -37,20 +37,63 @@ import java.util.Locale
 class CommandExecutor(
     private val context: Context,
     private val speaker: VoiceSpeaker,
-    private val onLog: (String) -> Unit
+    private val onLog: (String) -> Unit,
+    private val onContinuousChatNextTurn: (() -> Unit)? = null
 ) {
 
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-    private val geminiBrain = GeminiBrainClient(context)
+    val geminiBrain = GeminiBrainClient(context)
     private val scope = CoroutineScope(Dispatchers.Main)
     private var isTorchOn = false
+
+    var isContinuousChatActive = false
+        private set
+
+    fun stopContinuousChat() {
+        isContinuousChatActive = false
+        geminiBrain.clearConversationHistory()
+    }
 
     fun processCommand(rawText: String) {
         val command = rawText.lowercase().trim()
         onLog("Order Received: \"$rawText\"")
 
         when {
+            // A. Start Continuous Live Chat ("Guftugu shuru karo", "Live chat start", "Baatein karo")
+            command.contains("guftugu shuru") || command.contains("live chat start") || command.contains("baat cheet shuru") || command.contains("continuous chat") || command.contains("baatein karo") -> {
+                isContinuousChatActive = true
+                geminiBrain.clearConversationHistory()
+                onLog("Live Chat: Continuous conversation ACTIVE (No 'Hey Vector' needed!)")
+                speaker.speak("Guftugu shuru ho gayi hai boss. Ab aap bina Hey Vector bole lagatar baat kar sakte hain.") {
+                    onContinuousChatNextTurn?.invoke()
+                }
+            }
+
+            // B. Stop Continuous Live Chat ("Chat band karo", "Guftugu khatam", "Stop chat", "Alvida", "Bye", "Bas theek hai")
+            isContinuousChatActive && (command.contains("chat band") || command.contains("guftugu band") || command.contains("guftugu khatam") || command.contains("stop chat") || command.contains("alvida") || command.contains("bye") || command.contains("bas theek hai") || command == "chup" || command == "stop") -> {
+                stopContinuousChat()
+                onLog("Live Chat: Switched back to normal wake word mode")
+                speaker.speak("Theek hai boss, continuous chat band ho gayi hai. Normal mode active hai.")
+            }
+
+            // C. Long-Term Memory Save ("Yaad rakho mera office 9 baje hai", "Remember that my favourite food is Biryani")
+            command.startsWith("yaad rakho") || command.startsWith("remember") || command.contains("yaad rakhna") || command.contains("yaad rakh lo") -> {
+                handleSaveMemory(rawText)
+            }
+
+            // D. Long-Term Memory Recall ("Kya yaad hai", "Meri memories batao", "What do you remember")
+            command.contains("kya yaad hai") || command.contains("meri memories") || command.contains("what do you remember") || command.contains("kya yaad rakha") -> {
+                handleRecallMemories()
+            }
+
+            // E. Clear All Memories ("Memories clear karo", "Sab bhool jao", "Clear memories")
+            command.contains("memories clear") || command.contains("sab bhool jao") || command.contains("clear memories") -> {
+                geminiBrain.memoryManager.clearAllMemories()
+                speaker.speak("Main ne aapki saari personal memories clear kar di hain.")
+                onLog("Memory: All personal memories wiped successfully")
+            }
+
             // 1. Bulk / Multi-Contact WhatsApp Campaign ("In sab ko WhatsApp per attractive message bhejo: Ali, Hamza, Bilal ke Sale shuru ho gayi hai")
             (command.contains("in sab") || command.contains("sab ko") || command.contains("multi") || command.contains("campaign")) && command.contains("whatsapp") -> {
                 handleMultiContactWhatsApp(rawText)
@@ -203,18 +246,72 @@ class CommandExecutor(
     }
 
     /**
-     * Conversational Topic / Deep Intelligence powered by Gemini Pro
+     * Conversational Topic / Deep Intelligence powered by Gemini Pro (with Continuous Live Chat & Memory)
      */
     private fun handleGeminiAIConversation(query: String) {
         scope.launch {
             onLog("Asking Gemini Pro: \"$query\"...")
-            speaker.speak("Soch raha hoon...")
+            if (!isContinuousChatActive) {
+                speaker.speak("Soch raha hoon...")
+            }
 
-            val geminiResponse = geminiBrain.askGemini(query)
+            val geminiResponse = geminiBrain.askGemini(query, isContinuousSession = isContinuousChatActive)
             onLog("Gemini Response: $geminiResponse")
 
             // Vector speaks the intelligent answer!
-            speaker.speak(geminiResponse)
+            speaker.speak(geminiResponse) {
+                if (isContinuousChatActive) {
+                    onContinuousChatNextTurn?.invoke()
+                }
+            }
+        }
+    }
+
+    private fun handleSaveMemory(rawText: String) {
+        val fact = rawText
+            .replace("yaad rakho ke", "", ignoreCase = true)
+            .replace("yaad rakho", "", ignoreCase = true)
+            .replace("remember that", "", ignoreCase = true)
+            .replace("remember", "", ignoreCase = true)
+            .replace("yaad rakhna ke", "", ignoreCase = true)
+            .replace("yaad rakhna", "", ignoreCase = true)
+            .replace("yaad rakh lo", "", ignoreCase = true)
+            .trim()
+
+        if (fact.length > 2) {
+            val success = geminiBrain.memoryManager.addMemory(fact)
+            if (success) {
+                val response = "Theek hai boss, main ne yaad rakh liya: $fact"
+                speaker.speak(response) {
+                    if (isContinuousChatActive) onContinuousChatNextTurn?.invoke()
+                }
+                onLog("Memory Saved: \"$fact\"")
+            } else {
+                val response = "Yeh baat mujhe pehle se yaad hai boss."
+                speaker.speak(response) {
+                    if (isContinuousChatActive) onContinuousChatNextTurn?.invoke()
+                }
+            }
+        } else {
+            speaker.speak("Aap kya baat yaad rakhwana chahte hain?") {
+                if (isContinuousChatActive) onContinuousChatNextTurn?.invoke()
+            }
+        }
+    }
+
+    private fun handleRecallMemories() {
+        val memories = geminiBrain.memoryManager.getAllMemories()
+        if (memories.isEmpty()) {
+            val response = "Mujhe abhi aapke bare mein koi baat yaad nahi hai. Bolen: 'Yaad rakho ke mera blood group B hai'."
+            speaker.speak(response) {
+                if (isContinuousChatActive) onContinuousChatNextTurn?.invoke()
+            }
+        } else {
+            val spoken = "Mujhe aapke bare mein yeh baatein yaad hain: " + memories.joinToString(". ")
+            speaker.speak(spoken) {
+                if (isContinuousChatActive) onContinuousChatNextTurn?.invoke()
+            }
+            onLog("Memories Recalled: ${memories.size} facts")
         }
     }
 

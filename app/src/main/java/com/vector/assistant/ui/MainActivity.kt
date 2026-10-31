@@ -39,6 +39,9 @@ class MainActivity : AppCompatActivity() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val msg = intent?.getStringExtra(VectorVoiceService.EXTRA_LOG_MSG) ?: return
             appendLog(msg)
+            if (msg.contains("Memory", ignoreCase = true)) {
+                updateMemoriesUI()
+            }
         }
     }
 
@@ -65,6 +68,7 @@ class MainActivity : AppCompatActivity() {
         updateVoiceProfileUI()
         updateServiceStateUI()
         updateVipListUI()
+        updateMemoriesUI()
     }
 
     override fun onResume() {
@@ -72,6 +76,7 @@ class MainActivity : AppCompatActivity() {
         updatePermissionStatusUI()
         updateServiceStateUI()
         updateVipListUI()
+        updateMemoriesUI()
         val filter = IntentFilter(VectorVoiceService.BROADCAST_LOG)
         ContextCompat.registerReceiver(this, logReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
@@ -307,6 +312,16 @@ class MainActivity : AppCompatActivity() {
             binding.tvVipList.text = "Active VIPs: None (Bol kar add karein: 'Set VIP contact Ali')"
         } else {
             binding.tvVipList.text = "Active VIPs: " + vips.joinToString(", ") { it.replaceFirstChar { c -> c.uppercase() } }
+        }
+    }
+
+    private fun updateMemoriesUI() {
+        val memoryManager = com.vector.assistant.ai.VectorMemoryManager(this)
+        val memories = memoryManager.getAllMemories()
+        if (memories.isEmpty()) {
+            binding.tvMemoriesStatus.text = "🧠 AI Memory: 0 facts saved (Bol kar save karein: 'Yaad rakho mera office 9 baje hai')"
+        } else {
+            binding.tvMemoriesStatus.text = "🧠 AI Memory (${memories.size} facts): " + memories.take(2).joinToString(", ") + if (memories.size > 2) "..." else ""
         }
     }
 

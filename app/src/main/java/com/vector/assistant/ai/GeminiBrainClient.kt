@@ -14,13 +14,20 @@ import java.net.URL
 
 /**
  * Connects Vector Assistant directly to Google Gemini Pro / Flash API.
- * Handles high-level reasoning, intelligent Urdu/English chatting,
- * and generating attractive customized WhatsApp marketing or greeting messages!
+ * Handles:
+ * 1. Long-term memory-infused reasoning
+ * 2. Multi-turn continuous conversation (Gemini Live Mode)
+ * 3. High quality Roman Urdu / Urdu / English spoken responses
+ * 4. Attractive bulk WhatsApp marketing & greeting generators
  */
-class GeminiBrainClient(context: Context) {
+class GeminiBrainClient(private val context: Context) {
 
     private val prefs: SharedPreferences =
         context.getSharedPreferences("vector_gemini_prefs", Context.MODE_PRIVATE)
+    val memoryManager = VectorMemoryManager(context)
+
+    // In-memory conversation history for Continuous Live Chat
+    private val conversationHistory = ArrayList<JSONObject>()
 
     companion object {
         private const val KEY_API_KEY = "gemini_api_key"
@@ -40,18 +47,66 @@ class GeminiBrainClient(context: Context) {
         return !key.isNullOrBlank()
     }
 
+    fun clearConversationHistory() {
+        conversationHistory.clear()
+    }
+
     /**
-     * Ask Gemini any general question or topic.
-     * Vector gets a natural, concise spoken answer.
+     * Ask Gemini any question, taking long-term memories into account.
      */
-    suspend fun askGemini(userPrompt: String): String = withContext(Dispatchers.IO) {
+    suspend fun askGemini(userPrompt: String, isContinuousSession: Boolean = false): String = withContext(Dispatchers.IO) {
         val apiKey = getApiKey()
         if (apiKey.isNullOrBlank()) {
-            return@withContext "Gemini API key configure nahi hai. App settings mein ja kar apni Gemini Pro key enter karein."
+            return@withContext "Gemini API key configure nahi hai. App settings mein ja kar apni Gemini key lagayein."
         }
 
-        val systemInstruction = "You are Vector, a smart, loyal, futuristic Android voice assistant. Answer in Roman Urdu or friendly Urdu/English concisely in 2-3 spoken sentences so it sounds natural when read aloud."
-        return@withContext callGeminiApi(apiKey, "$systemInstruction\n\nUser asked: $userPrompt")
+        val memoriesSnippet = memoryManager.getFormattedMemoriesForPrompt()
+        val systemInstruction = """
+            You are Vector, an ultra-smart, loyal, futuristic Android voice assistant.
+            $memoriesSnippet
+            Guidelines:
+            1. Answer in natural conversational Roman Urdu (or friendly Urdu/English).
+            2. Keep responses brief (1-3 spoken sentences), perfect for speech audio output.
+            3. Do not include markdown asterisks (*, **), bullet points, or complex symbols, speak naturally like a human.
+        """.trimIndent()
+
+        if (!isContinuousSession) {
+            clearConversationHistory()
+        }
+
+        // Add user turn to conversation history
+        val userTurn = JSONObject().apply {
+            put("role", "user")
+            put("parts", JSONArray().apply {
+                put(JSONObject().apply {
+                    val textWithContext = if (conversationHistory.isEmpty()) {
+                        "$systemInstruction\n\nUser: $userPrompt"
+                    } else {
+                        userPrompt
+                    }
+                    put("text", textWithContext)
+                })
+            })
+        }
+        conversationHistory.add(userTurn)
+
+        // Limit conversation history to last 10 messages to save context and speed up response
+        if (conversationHistory.size > 10) {
+            conversationHistory.removeAt(0)
+        }
+
+        val answer = callGeminiMultiTurnApi(apiKey, conversationHistory)
+
+        // Add assistant response to history
+        val modelTurn = JSONObject().apply {
+            put("role", "model")
+            put("parts", JSONArray().apply {
+                put(JSONObject().apply { put("text", answer) })
+            })
+        }
+        conversationHistory.add(modelTurn)
+
+        return@withContext answer
     }
 
     /**
@@ -61,15 +116,26 @@ class GeminiBrainClient(context: Context) {
     suspend fun generateAttractiveWhatsAppMessage(topic: String): String = withContext(Dispatchers.IO) {
         val apiKey = getApiKey()
         if (apiKey.isNullOrBlank()) {
-            // High-quality local template fallback if API key is not yet set
             return@withContext "Salam! Umeed hai aap khairiyat se honge. Ek zaroori aur dilchasp update share karni thi: $topic. Tafseelat ke liye rabta farmayein!"
         }
 
         val prompt = "Write a very attractive, warm, professional, and engaging WhatsApp message (in Roman Urdu / Urdu with polite emojis) about this topic: '$topic'. Keep it appealing, concise, and ready to send directly to friends, clients, or contacts. Do not add quotes."
-        return@withContext callGeminiApi(apiKey, prompt)
+        return@withContext callGeminiSinglePrompt(apiKey, prompt)
     }
 
-    private fun callGeminiApi(apiKey: String, prompt: String): String {
+    private fun callGeminiSinglePrompt(apiKey: String, prompt: String): String {
+        val singleTurn = ArrayList<JSONObject>().apply {
+            add(JSONObject().apply {
+                put("role", "user")
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply { put("text", prompt) })
+                })
+            })
+        }
+        return callGeminiMultiTurnApi(apiKey, singleTurn)
+    }
+
+    private fun callGeminiMultiTurnApi(apiKey: String, contentsList: List<JSONObject>): String {
         var conn: HttpURLConnection? = null
         try {
             val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/$DEFAULT_MODEL:generateContent?key=$apiKey"
@@ -82,18 +148,17 @@ class GeminiBrainClient(context: Context) {
                 readTimeout = 12000
             }
 
-            // Construct JSON payload
+            val contentsArray = JSONArray()
+            for (turn in contentsList) {
+                contentsArray.put(turn)
+            }
+
             val rootJson = JSONObject().apply {
-                val contents = JSONArray().apply {
-                    val partObj = JSONObject().apply {
-                        val parts = JSONArray().apply {
-                            put(JSONObject().apply { put("text", prompt) })
-                        }
-                        put("parts", parts)
-                    }
-                    put(partObj)
-                }
-                put("contents", contents)
+                put("contents", contentsArray)
+                put("generationConfig", JSONObject().apply {
+                    put("temperature", 0.7)
+                    put("maxOutputTokens", 250)
+                })
             }
 
             OutputStreamWriter(conn.outputStream).use { writer ->
@@ -118,12 +183,14 @@ class GeminiBrainClient(context: Context) {
                     val content = firstCandidate.optJSONObject("content")
                     val parts = content?.optJSONArray("parts")
                     if (parts != null && parts.length() > 0) {
-                        return parts.getJSONObject(0).optString("text", "Koi jawab nahi mila.")
+                        val text = parts.getJSONObject(0).optString("text", "Koi jawab nahi mila.")
+                        // Clean markdown asterisks for smooth TTS
+                        return text.replace("*", "").replace("#", "").trim()
                     }
                 }
-                return "Gemini se jawab parse nahi ho saka."
+                return "Jawab samajh nahi aaya."
             } else {
-                return "Gemini API Error ($responseCode). Baraye meharbani apni API key check karein."
+                return "Gemini API Error ($responseCode). API key check karein."
             }
         } catch (e: Exception) {
             return "Internet ya Gemini se connect karne mein masla: ${e.message}"
