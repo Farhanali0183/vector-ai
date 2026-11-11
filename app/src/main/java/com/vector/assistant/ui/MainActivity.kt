@@ -1,58 +1,47 @@
 package com.vector.assistant.ui
 
 import android.Manifest
-import android.annotation.SuppressLint
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
-import android.provider.Settings
 import android.view.View
+import android.view.inputmethod.EditorInfo
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.recyclerview.widget.LinearLayoutManager
 import com.vector.assistant.R
-import com.vector.assistant.audio.VoiceprintMatcher
+import com.vector.assistant.ai.GeminiBrainClient
 import com.vector.assistant.databinding.ActivityMainBinding
+import com.vector.assistant.model.VectorSessionState
+import com.vector.assistant.model.VectorSettings
+import com.vector.assistant.model.VectorState
 import com.vector.assistant.service.VectorVoiceService
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
-    private lateinit var voiceprintMatcher: VoiceprintMatcher
-    private val scope = CoroutineScope(Dispatchers.Main)
-
-    private val logReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            val msg = intent?.getStringExtra(VectorVoiceService.EXTRA_LOG_MSG) ?: return
-            appendLog(msg)
-            if (msg.contains("Memory", ignoreCase = true)) {
-                updateMemoriesUI()
-            }
-        }
-    }
+    private lateinit var settings: VectorSettings
+    private lateinit var geminiBrain: GeminiBrainClient
+    private val chatAdapter = ChatAdapter()
 
     private val requestPermissionsLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
-            updatePermissionStatusUI()
-            val allGranted = permissions.entries.all { it.value }
-            if (allGranted) {
-                appendLog("All runtime permissions granted!")
-            } else {
-                appendLog("Some permissions were denied. Some functions might not work.")
+            val micGranted = permissions[Manifest.permission.RECORD_AUDIO] == true ||
+                ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            refreshSetupBannerAndHeader()
+            if (micGranted && !settings.userExplicitlyPaused && !VectorVoiceService.isServiceRunning) {
+                startVectorService()
+            } else if (!micGranted) {
+                Toast.makeText(this, "Microphone permission is required for Vector voice wake.", Toast.LENGTH_LONG).show()
             }
         }
 
@@ -61,37 +50,59 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        voiceprintMatcher = VoiceprintMatcher(this)
+        settings = VectorSettings(this)
+        geminiBrain = GeminiBrainClient(this)
 
-        setupUI()
+        setupRecyclerView()
+        setupClickListeners()
+        observeSessionState()
         checkAndRequestPermissions()
-        updateVoiceProfileUI()
-        updateServiceStateUI()
-        updateVipListUI()
-        updateMemoriesUI()
     }
 
     override fun onResume() {
         super.onResume()
-        updatePermissionStatusUI()
-        updateServiceStateUI()
-        updateVipListUI()
-        updateMemoriesUI()
-        val filter = IntentFilter(VectorVoiceService.BROADCAST_LOG)
-        ContextCompat.registerReceiver(this, logReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
-    }
+        VectorVoiceService.isMainActivityVisible = true
+        refreshSetupBannerAndHeader()
 
-    override fun onPause() {
-        super.onPause()
-        try {
-            unregisterReceiver(logReceiver)
-        } catch (e: Exception) {
-            // Ignore
+        // Automatically keep Vector hands-free armed when Mic is granted and user didn't pause
+        val hasMic = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (hasMic && !settings.userExplicitlyPaused && !VectorVoiceService.isServiceRunning) {
+            startVectorService()
         }
     }
 
-    private fun setupUI() {
-        // Master Toggle Button (Start / Stop Vector)
+    override fun onPause() {
+        VectorVoiceService.isMainActivityVisible = false
+        super.onPause()
+    }
+
+    private fun setupRecyclerView() {
+        binding.rvChat.apply {
+            layoutManager = LinearLayoutManager(this@MainActivity).apply {
+                stackFromEnd = true
+            }
+            adapter = chatAdapter
+            itemAnimator = null
+        }
+    }
+
+    private fun setupClickListeners() {
+        // Open Control Center BottomSheet
+        binding.btnOpenSettings.setOnClickListener { openSettingsSheet() }
+        binding.bannerSetup.setOnClickListener { openSettingsSheet() }
+        binding.btnScreenOffBadge.setOnClickListener { openSettingsSheet() }
+
+        // Clear conversation bubbles
+        binding.btnClearChat.setOnClickListener {
+            VectorSessionState.clearMessages()
+            geminiBrain.clearConversationHistory()
+            Toast.makeText(this, "Conversation cleared", Toast.LENGTH_SHORT).show()
+        }
+
+        // Toggle always-on service Power On / Pause
         binding.btnToggleService.setOnClickListener {
             if (VectorVoiceService.isServiceRunning) {
                 stopVectorService()
@@ -100,217 +111,194 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Tap on "Suno Vector" glowing orb to talk directly
-        binding.pulseContainer.setOnClickListener {
-            val intent = Intent(this, VectorVoiceService::class.java).apply {
-                action = VectorVoiceService.ACTION_TRIGGER_LISTEN
-            }
-            ContextCompat.startForegroundService(this, intent)
-            updateServiceStateUI(true)
-            appendLog("Tapped 'Suno Vector'! Listening for command...")
-        }
-
-        // Hands-Free Continuous Live Chat Button
+        // Toggle hands-free Continuous Live Chat
         binding.btnToggleContinuousChat.setOnClickListener {
+            if (!ensureMicPermission()) return@setOnClickListener
             val intent = Intent(this, VectorVoiceService::class.java).apply {
                 action = VectorVoiceService.ACTION_TOGGLE_CONTINUOUS
             }
             ContextCompat.startForegroundService(this, intent)
-            binding.root.postDelayed({
-                updateContinuousChatButtonUI()
-            }, 300)
         }
 
-        // Voice Training Button
-        binding.btnTrainVoice.setOnClickListener {
-            recordVoiceSampleForTraining()
+        // Optional tap-to-talk shortcuts on Visor or Mic button
+        val triggerQuickListen = View.OnClickListener {
+            if (!ensureMicPermission()) return@OnClickListener
+            val intent = Intent(this, VectorVoiceService::class.java).apply {
+                action = VectorVoiceService.ACTION_TRIGGER_LISTEN
+            }
+            ContextCompat.startForegroundService(this, intent)
         }
+        binding.vectorVisor.setOnClickListener(triggerQuickListen)
+        binding.btnMicQuick.setOnClickListener(triggerQuickListen)
 
-        // Gemini Pro Key Setup
-        val geminiBrain = com.vector.assistant.ai.GeminiBrainClient(this)
-        updateGeminiStatusUI(geminiBrain)
-
-        binding.btnSaveGeminiKey.setOnClickListener {
-            val key = binding.etGeminiApiKey.text?.toString()?.trim() ?: ""
-            if (key.isNotEmpty()) {
-                binding.btnSaveGeminiKey.isEnabled = false
-                binding.btnSaveGeminiKey.text = "Verifying & Connecting Key..."
-                scope.launch {
-                    geminiBrain.saveApiKey(key)
-                    val testAnswer = geminiBrain.askGemini("Salam")
-                    binding.btnSaveGeminiKey.isEnabled = true
-                    if (!testAnswer.contains("Error", ignoreCase = true) && !testAnswer.contains("issue", ignoreCase = true)) {
-                        Toast.makeText(this@MainActivity, "Gemini Connected! (${geminiBrain.getWorkingModel()})", Toast.LENGTH_SHORT).show()
-                        appendLog("Gemini Verified: Connected with model ${geminiBrain.getWorkingModel()}")
-                    } else {
-                        Toast.makeText(this@MainActivity, "Gemini: $testAnswer", Toast.LENGTH_LONG).show()
-                        appendLog("Gemini Status: $testAnswer")
-                    }
-                    updateGeminiStatusUI(geminiBrain)
-                    binding.etGeminiApiKey.setText("")
-                }
+        // Text prompt composer
+        binding.btnSendPrompt.setOnClickListener { submitTypedPrompt() }
+        binding.etPrompt.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEND) {
+                submitTypedPrompt()
+                true
             } else {
-                Toast.makeText(this, "Please enter a valid API key", Toast.LENGTH_SHORT).show()
+                false
             }
         }
 
-        // Permission Buttons
-        binding.btnPermBattery.setOnClickListener {
-            requestIgnoreBatteryOptimization()
-        }
+        // Quick command suggestion chips
+        binding.chipPrompt1.setOnClickListener { sendPromptText("Time kya hua?") }
+        binding.chipPrompt2.setOnClickListener { sendPromptText("Battery status") }
+        binding.chipPrompt3.setOnClickListener { sendPromptText("Torch on karo") }
+        binding.chipPrompt4.setOnClickListener { sendPromptText("Mujhe ek interesting science fact sunao") }
+    }
 
-        binding.btnPermAccessibility.setOnClickListener {
-            openAccessibilitySettings()
-        }
-
-        binding.btnPermNotification.setOnClickListener {
-            openNotificationListenerSettings()
-        }
-
-        binding.btnPermPhone.setOnClickListener {
-            checkAndRequestPermissions()
+    private fun observeSessionState() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                launch {
+                    VectorSessionState.state.collect { state ->
+                        binding.vectorVisor.setVectorState(state)
+                        updateStateUI(state)
+                    }
+                }
+                launch {
+                    VectorSessionState.statusSubtitle.collect { subtitle ->
+                        binding.tvServiceState.text = subtitle
+                    }
+                }
+                launch {
+                    VectorSessionState.audioLevel.collect { level ->
+                        binding.vectorVisor.setAudioLevel(level)
+                    }
+                }
+                launch {
+                    VectorSessionState.isContinuousChat.collect { continuous ->
+                        updateContinuousPill(continuous)
+                    }
+                }
+                launch {
+                    VectorSessionState.messages.collect { msgs ->
+                        chatAdapter.submitList(msgs) {
+                            if (msgs.isNotEmpty()) {
+                                binding.rvChat.scrollToPosition(msgs.size - 1)
+                            }
+                        }
+                        binding.emptyStateContainer.visibility = if (msgs.isEmpty()) View.VISIBLE else View.GONE
+                    }
+                }
+            }
         }
     }
 
-    private fun updateGeminiStatusUI(gemini: com.vector.assistant.ai.GeminiBrainClient) {
-        if (gemini.isConnected()) {
-            binding.tvGeminiStatus.text = "Status: ACTIVE & CONNECTED (${gemini.getWorkingModel()})"
-            binding.tvGeminiStatus.setTextColor(ContextCompat.getColor(this, R.color.neon_green))
-            binding.btnSaveGeminiKey.text = "UPDATE GEMINI PRO KEY"
-        } else {
-            binding.tvGeminiStatus.text = "Status: Enter your Gemini API key to activate super intelligence!"
-            binding.tvGeminiStatus.setTextColor(ContextCompat.getColor(this, R.color.text_secondary))
-            binding.btnSaveGeminiKey.text = "CONNECT GEMINI PRO"
+    private fun updateStateUI(state: VectorState) {
+        val (badgeText, badgeColor, badgeBg) = when (state) {
+            VectorState.IDLE -> Triple("● PAUSED", R.color.text_muted, R.drawable.bg_pill_surface)
+            VectorState.LISTENING_WAKE -> Triple("● LISTENING", R.color.neon_green, R.drawable.bg_pill_active_green)
+            VectorState.LISTENING_COMMAND -> Triple("● HEARING YOU", R.color.neon_cyan, R.drawable.bg_pill_active_cyan)
+            VectorState.THINKING -> Triple("● THINKING", R.color.neon_purple, R.drawable.bg_pill_active_purple)
+            VectorState.SPEAKING -> Triple("● SPEAKING", R.color.neon_green, R.drawable.bg_pill_active_green)
         }
+        binding.tvStatusBadge.text = badgeText
+        binding.tvStatusBadge.setTextColor(ContextCompat.getColor(this, badgeColor))
+        binding.tvStatusBadge.setBackgroundResource(badgeBg)
+
+        val running = VectorVoiceService.isServiceRunning || state != VectorState.IDLE
+        if (running) {
+            binding.btnToggleService.text = "Active"
+            binding.btnToggleService.setTextColor(ContextCompat.getColor(this, R.color.neon_cyan))
+            binding.btnToggleService.setBackgroundResource(R.drawable.bg_pill_active_cyan)
+        } else {
+            binding.btnToggleService.text = "Power On"
+            binding.btnToggleService.setTextColor(ContextCompat.getColor(this, R.color.text_primary))
+            binding.btnToggleService.setBackgroundResource(R.drawable.bg_pill_surface)
+        }
+    }
+
+    private fun updateContinuousPill(active: Boolean) {
+        if (active) {
+            binding.btnToggleContinuousChat.text = "Live Chat • ON"
+            binding.btnToggleContinuousChat.setTextColor(ContextCompat.getColor(this, R.color.neon_purple))
+            binding.btnToggleContinuousChat.setBackgroundResource(R.drawable.bg_pill_active_purple)
+        } else {
+            binding.btnToggleContinuousChat.text = "Live Chat"
+            binding.btnToggleContinuousChat.setTextColor(ContextCompat.getColor(this, R.color.text_secondary))
+            binding.btnToggleContinuousChat.setBackgroundResource(R.drawable.bg_pill_surface)
+        }
+    }
+
+    private fun refreshSetupBannerAndHeader() {
+        val hasMic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        val geminiOk = geminiBrain.isConnected()
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val batteryUnrestricted = pm?.isIgnoringBatteryOptimizations(packageName) == true
+
+        binding.tvHeaderSubtitle.text = if (geminiOk) {
+            "${geminiBrain.getWorkingModel()} • ${if (batteryUnrestricted) "Screen-Off Ready" else "Tap Screen-Off"}"
+        } else {
+            "Connect Gemini API Key in Settings"
+        }
+
+        if (batteryUnrestricted) {
+            binding.btnScreenOffBadge.text = "Screen-Off ✓"
+            binding.btnScreenOffBadge.setTextColor(ContextCompat.getColor(this, R.color.neon_green))
+            binding.btnScreenOffBadge.setBackgroundResource(R.drawable.bg_pill_active_green)
+        } else {
+            binding.btnScreenOffBadge.text = "Screen-Off"
+            binding.btnScreenOffBadge.setTextColor(ContextCompat.getColor(this, R.color.neon_amber))
+            binding.btnScreenOffBadge.setBackgroundResource(R.drawable.bg_pill_surface)
+        }
+
+        binding.bannerSetup.visibility = if (!hasMic || !geminiOk) View.VISIBLE else View.GONE
+    }
+
+    private fun openSettingsSheet() {
+        val existing = supportFragmentManager.findFragmentByTag("VectorSettingsSheet")
+        if (existing != null) return
+        SettingsBottomSheet().apply {
+            onRequestRuntimePermissions = { checkAndRequestPermissions() }
+            onSettingsChanged = { refreshSetupBannerAndHeader() }
+        }.show(supportFragmentManager, "VectorSettingsSheet")
+    }
+
+    private fun submitTypedPrompt() {
+        val text = binding.etPrompt.text?.toString()?.trim().orEmpty()
+        if (text.isEmpty()) return
+        binding.etPrompt.setText("")
+        sendPromptText(text)
+    }
+
+    private fun sendPromptText(text: String) {
+        val intent = Intent(this, VectorVoiceService::class.java).apply {
+            action = VectorVoiceService.ACTION_TEXT_COMMAND
+            putExtra(VectorVoiceService.EXTRA_TEXT_COMMAND, text)
+        }
+        startService(intent)
+    }
+
+    private fun ensureMicPermission(): Boolean {
+        val hasMic = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!hasMic) {
+            checkAndRequestPermissions()
+            Toast.makeText(this, "Please allow Microphone permission first", Toast.LENGTH_SHORT).show()
+            return false
+        }
+        return true
     }
 
     private fun startVectorService() {
+        if (!ensureMicPermission()) return
+        settings.userExplicitlyPaused = false
         val intent = Intent(this, VectorVoiceService::class.java).apply {
             action = VectorVoiceService.ACTION_START
         }
         ContextCompat.startForegroundService(this, intent)
-        updateServiceStateUI(true)
-        appendLog("Vector Service starting...")
     }
 
     private fun stopVectorService() {
+        settings.userExplicitlyPaused = true
         val intent = Intent(this, VectorVoiceService::class.java).apply {
             action = VectorVoiceService.ACTION_STOP
         }
         startService(intent)
-        updateServiceStateUI(false)
-        appendLog("Vector Service stopping...")
-    }
-
-    private fun updateServiceStateUI(isRunning: Boolean = VectorVoiceService.isServiceRunning) {
-        if (isRunning) {
-            binding.tvStatusBadge.text = "ACTIVE (ONLINE)"
-            binding.tvStatusBadge.setTextColor(ContextCompat.getColor(this, R.color.neon_green))
-            binding.btnToggleService.text = "STOP VECTOR ASSISTANT"
-            binding.btnToggleService.backgroundTintList =
-                ContextCompat.getColorStateList(this, R.color.neon_red)
-            binding.tvServiceState.text = "Listening for 'Hey Vector' / 'Suno Vector'..."
-        } else {
-            binding.tvStatusBadge.text = "PAUSED"
-            binding.tvStatusBadge.setTextColor(ContextCompat.getColor(this, R.color.text_muted))
-            binding.btnToggleService.text = "ACTIVATE VECTOR (START LISTENING)"
-            binding.btnToggleService.backgroundTintList =
-                ContextCompat.getColorStateList(this, R.color.neon_cyan)
-            binding.tvServiceState.text = "Vector is currently sleeping. Tap below to wake up."
-        }
-        updateContinuousChatButtonUI()
-    }
-
-    private fun updateContinuousChatButtonUI() {
-        val isActive = VectorVoiceService.isContinuousChatActive
-        if (isActive) {
-            binding.btnToggleContinuousChat.text = "STOP CONTINUOUS LIVE CHAT (ACTIVE)"
-            binding.btnToggleContinuousChat.backgroundTintList =
-                ContextCompat.getColorStateList(this, R.color.neon_red)
-        } else {
-            binding.btnToggleContinuousChat.text = "START CONTINUOUS LIVE CHAT (HANDS-FREE)"
-            binding.btnToggleContinuousChat.backgroundTintList =
-                ContextCompat.getColorStateList(this, R.color.neon_purple)
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun recordVoiceSampleForTraining() {
-        val enrolled = voiceprintMatcher.getEnrolledCount()
-        if (enrolled >= 3) {
-            voiceprintMatcher.resetProfile()
-            Toast.makeText(this, "Profile reset. Let's record fresh samples!", Toast.LENGTH_SHORT).show()
-            updateVoiceProfileUI()
-            return
-        }
-
-        binding.btnTrainVoice.isEnabled = false
-        binding.btnTrainVoice.text = "Recording... Please say: 'Hey Vector, Suno Vector' now!"
-        binding.trainingProgressBar.visibility = View.VISIBLE
-
-        scope.launch(Dispatchers.IO) {
-            val sampleRate = 16000
-            val channel = AudioFormat.CHANNEL_IN_MONO
-            val format = AudioFormat.ENCODING_PCM_16BIT
-            val bufferSize = AudioRecord.getMinBufferSize(sampleRate, channel, format)
-
-            var recorder: AudioRecord? = null
-            try {
-                recorder = AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
-                    sampleRate,
-                    channel,
-                    format,
-                    bufferSize
-                )
-                recorder.startRecording()
-
-                // Capture ~2.5 seconds of voice
-                val totalSamples = sampleRate * 5 / 2
-                val pcmBuffer = ShortArray(totalSamples)
-                var read = 0
-                while (read < totalSamples) {
-                    val count = recorder.read(pcmBuffer, read, totalSamples - read)
-                    if (count > 0) read += count else break
-                }
-
-                recorder.stop()
-                val newCount = voiceprintMatcher.enrollSample(pcmBuffer)
-
-                withContext(Dispatchers.Main) {
-                    binding.trainingProgressBar.visibility = View.GONE
-                    binding.btnTrainVoice.isEnabled = true
-                    updateVoiceProfileUI()
-                    appendLog("Voice Sample #$newCount recorded and analyzed successfully!")
-                    Toast.makeText(this@MainActivity, "Sample #$newCount saved!", Toast.LENGTH_SHORT).show()
-                }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    binding.trainingProgressBar.visibility = View.GONE
-                    binding.btnTrainVoice.isEnabled = true
-                    appendLog("Error recording voice sample: ${e.message}")
-                }
-            } finally {
-                recorder?.release()
-            }
-        }
-    }
-
-    private fun updateVoiceProfileUI() {
-        val count = voiceprintMatcher.getEnrolledCount()
-        binding.trainingProgressBar.progress = count
-
-        if (count >= 3) {
-            binding.tvVoiceProfileStatus.text =
-                "Profile: REGISTERED (Balanced threshold 0.50 - No more voice mismatch!)"
-            binding.tvVoiceProfileStatus.setTextColor(ContextCompat.getColor(this, R.color.neon_green))
-            binding.btnTrainVoice.text = "Reset & Re-Train Voice Profile"
-        } else {
-            binding.tvVoiceProfileStatus.text =
-                "Profile: Open Mode (Instant response to 'Hey Vector' / 'Suno Vector')."
-            binding.tvVoiceProfileStatus.setTextColor(ContextCompat.getColor(this, R.color.neon_cyan))
-            binding.btnTrainVoice.text = "Record Voice Sample ($count / 3)"
-        }
     }
 
     private fun checkAndRequestPermissions() {
@@ -322,90 +310,14 @@ class MainActivity : AppCompatActivity() {
             Manifest.permission.READ_CALL_LOG,
             Manifest.permission.READ_SMS
         )
-
-        // Android 13 POST_NOTIFICATIONS
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
         }
-
         val missing = permissionsToRequest.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
-
         if (missing.isNotEmpty()) {
             requestPermissionsLauncher.launch(missing.toTypedArray())
         }
-    }
-
-    private fun openNotificationListenerSettings() {
-        val intent = Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS")
-        startActivity(intent)
-        Toast.makeText(this, "Find 'Vector Assistant' and allow Notification Access for VIP alerts", Toast.LENGTH_LONG).show()
-    }
-
-    private fun updateVipListUI() {
-        val vips = com.vector.assistant.service.VectorNotificationListenerService.getVipContacts(this)
-        if (vips.isEmpty()) {
-            binding.tvVipList.text = "Active VIPs: None (Bol kar add karein: 'Set VIP contact Ali')"
-        } else {
-            binding.tvVipList.text = "Active VIPs: " + vips.joinToString(", ") { it.replaceFirstChar { c -> c.uppercase() } }
-        }
-    }
-
-    private fun updateMemoriesUI() {
-        val memoryManager = com.vector.assistant.ai.VectorMemoryManager(this)
-        val memories = memoryManager.getAllMemories()
-        if (memories.isEmpty()) {
-            binding.tvMemoriesStatus.text = "🧠 AI Memory: 0 facts saved (Bol kar save karein: 'Yaad rakho mera office 9 baje hai')"
-        } else {
-            binding.tvMemoriesStatus.text = "🧠 AI Memory (${memories.size} facts): " + memories.take(2).joinToString(", ") + if (memories.size > 2) "..." else ""
-        }
-    }
-
-    private fun requestIgnoreBatteryOptimization() {
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                data = Uri.parse("package:$packageName")
-            }
-            try {
-                startActivity(intent)
-            } catch (e: Exception) {
-                val generalIntent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                startActivity(generalIntent)
-            }
-        } else {
-            Toast.makeText(this, "Screen-off battery optimization is already disabled!", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun openAccessibilitySettings() {
-        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-        startActivity(intent)
-        Toast.makeText(this, "Find 'Vector Assistant' and turn it ON to enable phone tasks", Toast.LENGTH_LONG).show()
-    }
-
-    private fun updatePermissionStatusUI() {
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        if (pm.isIgnoringBatteryOptimizations(packageName)) {
-            binding.btnPermBattery.text = "ALLOWED"
-            binding.btnPermBattery.setTextColor(ContextCompat.getColor(this, R.color.neon_green))
-            binding.btnPermBattery.isEnabled = false
-        }
-
-        val hasPhone = ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
-        val hasContacts = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
-        if (hasPhone && hasContacts) {
-            binding.btnPermPhone.text = "ALLOWED"
-            binding.btnPermPhone.setTextColor(ContextCompat.getColor(this, R.color.neon_green))
-            binding.btnPermPhone.isEnabled = false
-        }
-    }
-
-    private fun appendLog(msg: String) {
-        val currentLogs = binding.tvLogs.text.toString()
-        val lines = currentLogs.split("\n").takeLast(8)
-        val updated = (lines + listOf("• $msg")).joinToString("\n")
-        binding.tvLogs.text = updated
     }
 }

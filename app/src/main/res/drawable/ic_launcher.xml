@@ -4,15 +4,25 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
     <path
-        android:fillColor="#0B0E14"
+        android:fillColor="#070A10"
         android:pathData="M0,0h108v108h-108z"/>
-    <!-- Glowing Outer Circle -->
+    <!-- Subtle Outer Halo -->
     <path
-        android:strokeColor="#00F0FF"
-        android:strokeWidth="3"
-        android:pathData="M54,18 A36,36 0 1,1 53.99,18"/>
-    <!-- Futuristic V Logo inside -->
+        android:strokeColor="#3300E5FF"
+        android:strokeWidth="2.5"
+        android:pathData="M24,30 L84,30 A14,14 0 0,1 98,44 L98,64 A14,14 0 0,1 84,78 L24,78 A14,14 0 0,1 10,64 L10,44 A14,14 0 0,1 24,30 Z"/>
+    <!-- Dark Obsidian Visor Frame -->
     <path
-        android:fillColor="#00F0FF"
-        android:pathData="M38,36 L54,72 L70,36 L62,36 L54,58 L46,36 Z"/>
+        android:fillColor="#0D1422"
+        android:strokeColor="#00E5FF"
+        android:strokeWidth="2.4"
+        android:pathData="M26,33 L82,33 A12,12 0 0,1 94,45 L94,63 A12,12 0 0,1 82,75 L26,75 A12,12 0 0,1 14,63 L14,45 A12,12 0 0,1 26,33 Z"/>
+    <!-- Expressive Left Cyan Eye -->
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M34,43 L44,43 A4,4 0 0,1 48,47 L48,61 A4,4 0 0,1 44,65 L34,65 A4,4 0 0,1 30,61 L30,47 A4,4 0 0,1 34,43 Z"/>
+    <!-- Expressive Right Cyan Eye -->
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M64,43 L74,43 A4,4 0 0,1 78,47 L78,61 A4,4 0 0,1 74,65 L64,65 A4,4 0 0,1 60,61 L60,47 A4,4 0 0,1 64,43 Z"/>
 </vector>

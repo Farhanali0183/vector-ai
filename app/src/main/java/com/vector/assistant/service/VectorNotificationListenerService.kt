@@ -41,6 +41,14 @@ class VectorNotificationListenerService : NotificationListenerService() {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().remove(KEY_VIP_LIST).apply()
         }
+
+        fun removeVipContact(context: Context, name: String) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val currentList = prefs.getStringSet(KEY_VIP_LIST, mutableSetOf()) ?: mutableSetOf()
+            val updated = HashSet(currentList)
+            updated.remove(name.lowercase().trim())
+            prefs.edit().putStringSet(KEY_VIP_LIST, updated).apply()
+        }
     }
 
     private var speaker: VoiceSpeaker? = null

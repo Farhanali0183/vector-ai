@@ -1,413 +1,370 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/bg_dark"
-    android:fillViewport="true">
+    android:background="@color/bg_dark">
 
+    <!-- Subtle Futuristic Ambient Backdrop -->
+    <View
+        android:layout_width="0dp"
+        android:layout_height="340dp"
+        android:background="@drawable/bg_hero_glow"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- Top Navigation Bar -->
     <LinearLayout
-        android:layout_width="match_parent"
+        android:id="@+id/topBar"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:padding="20dp">
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="16dp"
+        android:paddingTop="14dp"
+        android:paddingBottom="8dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
 
-        <!-- Top Header Bar -->
+        <ImageView
+            android:layout_width="34dp"
+            android:layout_height="34dp"
+            android:contentDescription="Vector Icon"
+            android:src="@drawable/ic_launcher" />
+
         <LinearLayout
-            android:layout_width="match_parent"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
+            android:layout_marginStart="10dp"
+            android:layout_weight="1"
+            android:orientation="vertical">
 
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="VECTOR AI"
-                    android:textColor="@color/neon_cyan"
-                    android:textSize="26sp"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Screen-Off Voice Control"
-                    android:textColor="@color/text_secondary"
-                    android:textSize="13sp" />
-            </LinearLayout>
-
-            <!-- Status Indicator Badge -->
             <TextView
-                android:id="@+id/tvStatusBadge"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:background="@drawable/bg_card"
+                android:letterSpacing="0.16"
+                android:text="VECTOR"
+                android:textColor="@color/text_primary"
+                android:textSize="17sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tvHeaderSubtitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="AI Voice Companion"
+                android:textColor="@color/text_secondary"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <!-- Compact Status Pill -->
+        <TextView
+            android:id="@+id/tvStatusBadge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="8dp"
+            android:background="@drawable/bg_pill_surface"
+            android:paddingHorizontal="10dp"
+            android:paddingVertical="5dp"
+            android:text="● PAUSED"
+            android:textColor="@color/text_muted"
+            android:textSize="11sp"
+            android:textStyle="bold" />
+
+        <ImageButton
+            android:id="@+id/btnClearChat"
+            android:layout_width="38dp"
+            android:layout_height="38dp"
+            android:layout_marginEnd="6dp"
+            android:background="@drawable/bg_circle_btn_subtle"
+            android:contentDescription="Clear chat"
+            android:padding="9dp"
+            android:src="@drawable/ic_delete" />
+
+        <ImageButton
+            android:id="@+id/btnOpenSettings"
+            android:layout_width="38dp"
+            android:layout_height="38dp"
+            android:background="@drawable/bg_circle_btn_subtle"
+            android:contentDescription="Control Center"
+            android:padding="9dp"
+            android:src="@drawable/ic_settings" />
+    </LinearLayout>
+
+    <!-- Setup Attention Pill (Auto-hides once Mic + Gemini are configured) -->
+    <TextView
+        android:id="@+id/bannerSetup"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginHorizontal="16dp"
+        android:layout_marginTop="4dp"
+        android:background="@drawable/bg_setup_banner"
+        android:gravity="center_vertical"
+        android:paddingHorizontal="14dp"
+        android:paddingVertical="9dp"
+        android:text="⚡ Setup incomplete: Tap here to add Gemini API Key &amp; permissions →"
+        android:textColor="@color/neon_amber"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        android:visibility="gone"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/topBar" />
+
+    <!-- Hero Animated Vector Visor Stage -->
+    <LinearLayout
+        android:id="@+id/heroStage"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:paddingHorizontal="16dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="10dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/bannerSetup">
+
+        <com.vector.assistant.ui.VectorVisorView
+            android:id="@+id/vectorVisor"
+            android:layout_width="230dp"
+            android:layout_height="136dp"
+            android:clickable="true"
+            android:focusable="true" />
+
+        <TextView
+            android:id="@+id/tvServiceState"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:gravity="center"
+            android:text="Say 'Hey Vector' or 'Suno Vector'"
+            android:textColor="@color/text_secondary"
+            android:textSize="13sp" />
+
+        <!-- Sleek Compact Mode Control Pills -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/btnToggleService"
+                android:layout_width="wrap_content"
+                android:layout_height="34dp"
+                android:background="@drawable/bg_pill_surface"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
                 android:paddingHorizontal="14dp"
-                android:paddingVertical="6dp"
-                android:text="OFFLINE"
-                android:textColor="@color/text_muted"
+                android:text="Power On"
+                android:textColor="@color/text_primary"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btnToggleContinuousChat"
+                android:layout_width="wrap_content"
+                android:layout_height="34dp"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/bg_pill_surface"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:paddingHorizontal="14dp"
+                android:text="Live Chat"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btnScreenOffBadge"
+                android:layout_width="wrap_content"
+                android:layout_height="34dp"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/bg_pill_surface"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:paddingHorizontal="12dp"
+                android:text="Screen-Off"
+                android:textColor="@color/text_secondary"
                 android:textSize="12sp"
                 android:textStyle="bold" />
         </LinearLayout>
+    </LinearLayout>
 
-        <!-- Central Glow Pulse / Assistant Trigger Visualizer -->
-        <LinearLayout
+    <!-- Conversation Feed Container -->
+    <FrameLayout
+        android:id="@+id/chatArea"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toTopOf="@id/composerContainer"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/heroStage">
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rvChat"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:paddingHorizontal="16dp"
+            android:paddingVertical="8dp" />
+
+        <!-- Clean Empty State with Quick Prompt Suggestions -->
+        <LinearLayout
+            android:id="@+id/emptyStateContainer"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
             android:gravity="center"
-            android:orientation="vertical">
-
-            <FrameLayout
-                android:id="@+id/pulseContainer"
-                android:layout_width="140dp"
-                android:layout_height="140dp"
-                android:background="@drawable/bg_circle_glow">
-
-                <TextView
-                    android:id="@+id/tvPulseCenter"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_gravity="center"
-                    android:gravity="center"
-                    android:text="Suno\nVector"
-                    android:textColor="@color/neon_cyan"
-                    android:textSize="18sp"
-                    android:textStyle="bold" />
-            </FrameLayout>
+            android:orientation="vertical"
+            android:paddingHorizontal="20dp">
 
             <TextView
-                android:id="@+id/tvServiceState"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="Say 'Hey Vector' or 'Suno Vector'"
+                android:text="Hands-Free AI Companion"
+                android:textColor="@color/text_primary"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:gravity="center"
+                android:text="Just say 'Hey Vector' or 'Suno Vector' anytime — even when screen is off — or tap a suggestion below."
                 android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                android:lineSpacingExtra="2dp" />
+
+            <HorizontalScrollView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:scrollbars="none">
+
+                <LinearLayout
+                    android:id="@+id/quickPromptsRow"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/chipPrompt1"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/bg_pill_surface"
+                        android:paddingHorizontal="12dp"
+                        android:paddingVertical="8dp"
+                        android:text="Time kya hua?"
+                        android:textColor="@color/neon_cyan"
+                        android:textSize="12sp" />
+
+                    <TextView
+                        android:id="@+id/chipPrompt2"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/bg_pill_surface"
+                        android:paddingHorizontal="12dp"
+                        android:paddingVertical="8dp"
+                        android:text="Battery status"
+                        android:textColor="@color/neon_cyan"
+                        android:textSize="12sp" />
+
+                    <TextView
+                        android:id="@+id/chipPrompt3"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/bg_pill_surface"
+                        android:paddingHorizontal="12dp"
+                        android:paddingVertical="8dp"
+                        android:text="Torch on karo"
+                        android:textColor="@color/neon_cyan"
+                        android:textSize="12sp" />
+
+                    <TextView
+                        android:id="@+id/chipPrompt4"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/bg_pill_surface"
+                        android:paddingHorizontal="12dp"
+                        android:paddingVertical="8dp"
+                        android:text="AI se ek fact sunao"
+                        android:textColor="@color/neon_cyan"
+                        android:textSize="12sp" />
+                </LinearLayout>
+            </HorizontalScrollView>
+        </LinearLayout>
+    </FrameLayout>
+
+    <!-- Bottom Prompt Composer + Quick Mic -->
+    <LinearLayout
+        android:id="@+id/composerContainer"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="14dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="14dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_composer_bar"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="16dp"
+            android:paddingEnd="6dp">
+
+            <EditText
+                android:id="@+id/etPrompt"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="@null"
+                android:hint="Message Vector..."
+                android:imeOptions="actionSend"
+                android:inputType="textCapSentences"
+                android:maxLines="1"
+                android:textColor="@color/text_primary"
+                android:textColorHint="@color/text_muted"
                 android:textSize="14sp" />
 
-            <!-- Master Toggle Button -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnToggleService"
-                android:layout_width="match_parent"
-                android:layout_height="56dp"
-                android:layout_marginTop="16dp"
-                android:backgroundTint="@color/neon_cyan"
-                android:text="ACTIVATE VECTOR (START LISTENING)"
-                android:textColor="@color/bg_dark"
-                android:textStyle="bold"
-                app:cornerRadius="14dp" />
-
-            <!-- Continuous Live Chat Toggle Button -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnToggleContinuousChat"
-                android:layout_width="match_parent"
-                android:layout_height="52dp"
-                android:layout_marginTop="10dp"
-                android:backgroundTint="@color/neon_purple"
-                android:text="💬 START CONTINUOUS LIVE CHAT (HANDS-FREE)"
-                android:textColor="@color/text_primary"
-                android:textStyle="bold"
-                app:cornerRadius="14dp" />
+            <ImageButton
+                android:id="@+id/btnSendPrompt"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:background="@drawable/bg_circle_btn_cyan"
+                android:contentDescription="Send message"
+                android:padding="8dp"
+                android:src="@drawable/ic_send" />
         </LinearLayout>
 
-        <!-- Speaker Recognition & Voice Training Card -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:background="@drawable/bg_card"
-            android:orientation="vertical"
-            android:padding="16dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="🔒 Voice Biometrics (Sirf Aapki Awaz)"
-                android:textColor="@color/text_primary"
-                android:textSize="16sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/tvVoiceProfileStatus"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:text="Profile: Not registered yet. Register so Vector only obeys you!"
-                android:textColor="@color/text_secondary"
-                android:textSize="13sp" />
-
-            <ProgressBar
-                android:id="@+id/trainingProgressBar"
-                style="?android:attr/progressBarStyleHorizontal"
-                android:layout_width="match_parent"
-                android:layout_height="8dp"
-                android:layout_marginTop="10dp"
-                android:max="3"
-                android:progress="0"
-                android:visibility="gone" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnTrainVoice"
-                android:layout_width="match_parent"
-                android:layout_height="48dp"
-                android:layout_marginTop="12dp"
-                android:backgroundTint="@color/card_border"
-                android:text="Record Voice Sample (0 / 3)"
-                android:textColor="@color/neon_cyan"
-                app:cornerRadius="10dp"
-                app:strokeColor="@color/neon_cyan"
-                app:strokeWidth="1dp" />
-        </LinearLayout>
-
-        <!-- Gemini Pro AI Brain Card -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:background="@drawable/bg_card"
-            android:orientation="vertical"
-            android:padding="16dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="🧠 Google Gemini Pro Integration"
-                android:textColor="@color/text_primary"
-                android:textSize="16sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/tvGeminiStatus"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="Status: Enter your Gemini API key to activate super intelligence!"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
-
-            <com.google.android.material.textfield.TextInputLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                app:boxBackgroundColor="@color/card_dark"
-                app:boxStrokeColor="@color/neon_cyan"
-                app:hintTextColor="@color/neon_cyan"
-                android:textColorHint="@color/text_secondary">
-
-                <com.google.android.material.textfield.TextInputEditText
-                    android:id="@+id/etGeminiApiKey"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:hint="Paste Gemini API Key here"
-                    android:inputType="textPassword"
-                    android:textColor="@color/text_primary"
-                    android:textSize="13sp" />
-            </com.google.android.material.textfield.TextInputLayout>
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnSaveGeminiKey"
-                android:layout_width="match_parent"
-                android:layout_height="44dp"
-                android:layout_marginTop="10dp"
-                android:backgroundTint="@color/neon_blue"
-                android:text="CONNECT GEMINI PRO"
-                android:textColor="@color/text_primary"
-                app:cornerRadius="10dp" />
-
-            <TextView
-                android:id="@+id/tvMemoriesStatus"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:text="🧠 AI Memory: 0 facts remembered (Bol kar save karein: 'Yaad rakho mera blood group B hai')"
-                android:textColor="@color/neon_cyan"
-                android:textSize="12sp" />
-        </LinearLayout>
-
-        <!-- Permissions Health Check Card (Android 13 One-Tap) -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:background="@drawable/bg_card"
-            android:orientation="vertical"
-            android:padding="16dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="⚡ Required Permissions (Android 13)"
-                android:textColor="@color/text_primary"
-                android:textSize="16sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="Screen off background aur tasks chalane ke liye zaroori:"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
-
-            <!-- Permission Items -->
-            <LinearLayout
-                android:id="@+id/rowPermBattery"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="1. Screen-Off Run (Battery Unrestricted)"
-                    android:textColor="@color/text_primary"
-                    android:textSize="13sp" />
-
-                <Button
-                    android:id="@+id/btnPermBattery"
-                    style="@style/Widget.MaterialComponents.Button.TextButton"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="ALLOW"
-                    android:textColor="@color/neon_cyan" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/rowPermAccessibility"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="2. Phone Control (Accessibility Service)"
-                    android:textColor="@color/text_primary"
-                    android:textSize="13sp" />
-
-                <Button
-                    android:id="@+id/btnPermAccessibility"
-                    style="@style/Widget.MaterialComponents.Button.TextButton"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="ENABLE"
-                    android:textColor="@color/neon_cyan" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/rowPermPhone"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="3. Calls, Contacts &amp; Call Logs Access"
-                    android:textColor="@color/text_primary"
-                    android:textSize="13sp" />
-
-                <Button
-                    android:id="@+id/btnPermPhone"
-                    style="@style/Widget.MaterialComponents.Button.TextButton"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="ALLOW"
-                    android:textColor="@color/neon_cyan" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/rowPermNotification"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="4. VIP Alert (Notification Access)"
-                    android:textColor="@color/text_primary"
-                    android:textSize="13sp" />
-
-                <Button
-                    android:id="@+id/btnPermNotification"
-                    style="@style/Widget.MaterialComponents.Button.TextButton"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="ENABLE"
-                    android:textColor="@color/neon_cyan" />
-            </LinearLayout>
-        </LinearLayout>
-
-        <!-- VIP Contacts Management Card -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:background="@drawable/bg_card"
-            android:orientation="vertical"
-            android:padding="16dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="🚨 VIP Contacts (Custom Alarm on WhatsApp/SMS)"
-                android:textColor="@color/text_primary"
-                android:textSize="16sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/tvVipList"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:text="Active VIPs: None (Bol kar add karein: 'Set VIP contact Ali')"
-                android:textColor="@color/neon_purple"
-                android:textSize="13sp" />
-        </LinearLayout>
-
-        <!-- Live Activity Log Card -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:layout_marginBottom="24dp"
-            android:background="@drawable/bg_card"
-            android:orientation="vertical"
-            android:padding="16dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="📡 Vector Live Feed"
-                android:textColor="@color/text_primary"
-                android:textSize="16sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/tvLogs"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:fontFamily="monospace"
-                android:text="[Vector Ready]\nWaiting for activation..."
-                android:textColor="@color/neon_green"
-                android:textSize="12sp" />
-        </LinearLayout>
-
+        <ImageButton
+            android:id="@+id/btnMicQuick"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/bg_circle_btn_cyan"
+            android:contentDescription="Speak now"
+            android:padding="12dp"
+            android:src="@drawable/ic_mic" />
     </LinearLayout>
-</ScrollView>
+
+</androidx.constraintlayout.widget.ConstraintLayout>

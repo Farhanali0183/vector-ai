@@ -1,6 +1,5 @@
-<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.VectorAssistant" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+    <style name="Theme.VectorAssistant" parent="Theme.MaterialComponents.NoActionBar">
         <item name="colorPrimary">@color/neon_cyan</item>
         <item name="colorPrimaryVariant">@color/neon_blue</item>
         <item name="colorOnPrimary">@color/bg_dark</item>
@@ -8,5 +7,26 @@
         <item name="android:statusBarColor">@color/bg_dark</item>
         <item name="android:navigationBarColor">@color/bg_dark</item>
         <item name="android:windowBackground">@color/bg_dark</item>
+        <item name="colorSurface">@color/card_dark</item>
+        <item name="colorOnSurface">@color/text_primary</item>
+    </style>
+
+    <style name="Theme.VectorBottomSheet" parent="Theme.MaterialComponents.BottomSheetDialog">
+        <item name="bottomSheetStyle">@style/VectorBottomSheetModal</item>
+        <item name="colorPrimary">@color/neon_cyan</item>
+        <item name="colorSecondary">@color/neon_purple</item>
+        <item name="colorSurface">@color/bg_elevated</item>
+        <item name="colorOnSurface">@color/text_primary</item>
+    </style>
+
+    <style name="VectorBottomSheetModal" parent="Widget.Design.BottomSheet.Modal">
+        <item name="android:background">@android:color/transparent</item>
+    </style>
+
+    <style name="VectorChoiceChip" parent="Widget.MaterialComponents.Chip.Choice">
+        <item name="chipBackgroundColor">@color/chip_bg_selector</item>
+        <item name="android:textColor">@color/chip_text_selector</item>
+        <item name="chipStrokeColor">@color/chip_stroke_selector</item>
+        <item name="chipStrokeWidth">1dp</item>
     </style>
 </resources>

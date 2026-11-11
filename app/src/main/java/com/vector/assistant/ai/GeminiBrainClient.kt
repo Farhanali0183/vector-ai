@@ -2,7 +2,9 @@ package com.vector.assistant.ai
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Base64
 import android.util.Log
+import com.vector.assistant.model.VoiceDecision
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -13,13 +15,25 @@ import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 
+data class GeminiVerifyResult(
+    val success: Boolean,
+    val model: String? = null,
+    val message: String
+)
+
+data class GeminiAudioResult(
+    val isApiSuccess: Boolean,
+    val decision: VoiceDecision? = null,
+    val errorMessage: String = ""
+)
+
 /**
- * Connects Vector Assistant directly to Google Gemini API.
+ * Connects Vector Assistant directly to Google Gemini v1beta API.
  * Features:
- * 1. Automatic Model Fallback (Handles 404 model retirement/region differences gracefully)
- * 2. Long-term memory-infused reasoning
- * 3. Multi-turn continuous conversation (Gemini Live Mode)
- * 4. High quality Roman Urdu / Urdu / English spoken responses
+ * 1. Real key verification & smart model discovery (excludes TTS/image/embedding models)
+ * 2. Top-level systemInstruction & thinkingBudget=0 (prevents maxOutputTokens exhaustion on Gemini 2.5+)
+ * 3. Multimodal audio/wav understanding (Wake word + Roman Urdu/English STT + Intent + Reply in 1 call)
+ * 4. Multi-turn continuous conversation memory without error pollution
  */
 class GeminiBrainClient(private val context: Context) {
 
@@ -27,116 +41,287 @@ class GeminiBrainClient(private val context: Context) {
         context.getSharedPreferences("vector_gemini_prefs", Context.MODE_PRIVATE)
     val memoryManager = VectorMemoryManager(context)
 
-    // In-memory conversation history for Continuous Live Chat
-    private val conversationHistory = ArrayList<JSONObject>()
-
     companion object {
         private const val KEY_API_KEY = "gemini_api_key"
         private const val KEY_WORKING_MODEL = "gemini_working_model"
         private const val TAG = "GeminiBrainClient"
 
-        // Candidate models in priority order to prevent 404 Not Found
+        private val historyLock = Any()
+        private val conversationHistory = ArrayList<JSONObject>()
+
         val CANDIDATE_MODELS = listOf(
             "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
             "gemini-2.0-flash",
-            "gemini-1.5-flash-latest",
-            "gemini-1.5-flash",
-            "gemini-pro"
+            "gemini-2.0-flash-lite"
         )
     }
 
     fun saveApiKey(apiKey: String) {
-        prefs.edit().putString(KEY_API_KEY, apiKey.trim()).apply()
+        prefs.edit()
+            .putString(KEY_API_KEY, apiKey.trim())
+            .remove(KEY_WORKING_MODEL)
+            .apply()
     }
 
-    fun getApiKey(): String? {
-        return prefs.getString(KEY_API_KEY, null)
+    fun clearApiKey() {
+        prefs.edit()
+            .remove(KEY_API_KEY)
+            .remove(KEY_WORKING_MODEL)
+            .apply()
     }
 
-    fun getWorkingModel(): String {
-        return prefs.getString(KEY_WORKING_MODEL, CANDIDATE_MODELS[0]) ?: CANDIDATE_MODELS[0]
-    }
+    fun getApiKey(): String? = prefs.getString(KEY_API_KEY, null)?.trim()?.takeIf { it.isNotEmpty() }
+
+    fun getWorkingModel(): String =
+        prefs.getString(KEY_WORKING_MODEL, CANDIDATE_MODELS[0]) ?: CANDIDATE_MODELS[0]
 
     fun setWorkingModel(model: String) {
         prefs.edit().putString(KEY_WORKING_MODEL, model).apply()
     }
 
-    fun isConnected(): Boolean {
-        val key = getApiKey()
-        return !key.isNullOrBlank()
-    }
+    fun isConnected(): Boolean = !getApiKey().isNullOrBlank()
 
     fun clearConversationHistory() {
-        conversationHistory.clear()
+        synchronized(historyLock) {
+            conversationHistory.clear()
+        }
     }
 
     /**
-     * Ask Gemini any question, taking long-term memories into account.
+     * Tests an API key against Google Gemini before saving it as active.
+     */
+    suspend fun verifyAndConnectKey(rawKey: String): GeminiVerifyResult = withContext(Dispatchers.IO) {
+        val cleanKey = rawKey.trim()
+        if (cleanKey.length < 15) {
+            return@withContext GeminiVerifyResult(
+                success = false,
+                message = "API key bohot chhoti ya invalid lag rahi hai."
+            )
+        }
+
+        val discoveredList = discoverRankedModelsFromGoogle(cleanKey)
+        val modelsToTry = LinkedHashSet<String>().apply {
+            addAll(CANDIDATE_MODELS)
+            addAll(discoveredList)
+        }.toList()
+
+        val probeTurns = listOf(
+            JSONObject().apply {
+                put("role", "user")
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply { put("text", "Reply with exactly: Ready") })
+                })
+            }
+        )
+
+        var lastHttpCode = -1
+        var lastErrorMsg = "Internet connection issue."
+
+        for (model in modelsToTry) {
+            val resp = executeRequest(
+                apiKey = cleanKey,
+                model = model,
+                systemInstruction = "Reply concisely.",
+                contentsList = probeTurns,
+                expectJson = false,
+                maxTokens = 64
+            )
+            if (resp.isSuccess) {
+                prefs.edit()
+                    .putString(KEY_API_KEY, cleanKey)
+                    .putString(KEY_WORKING_MODEL, model)
+                    .apply()
+                return@withContext GeminiVerifyResult(
+                    success = true,
+                    model = model,
+                    message = "Gemini connected successfully ($model)!"
+                )
+            }
+            lastHttpCode = resp.httpCode
+            lastErrorMsg = resp.text
+
+            if (resp.httpCode == 401 || resp.httpCode == 403 ||
+                resp.text.contains("API key not valid", ignoreCase = true) ||
+                resp.text.contains("API_KEY_INVALID", ignoreCase = true)
+            ) {
+                return@withContext GeminiVerifyResult(
+                    success = false,
+                    message = "API key invalid ya expire hai. Google AI Studio se sahi key check karein."
+                )
+            }
+        }
+
+        // If model listing worked (key valid) but all models were 429 quota limited
+        if (discoveredList.isNotEmpty() && lastHttpCode == 429) {
+            prefs.edit()
+                .putString(KEY_API_KEY, cleanKey)
+                .putString(KEY_WORKING_MODEL, discoveredList.first())
+                .apply()
+            return@withContext GeminiVerifyResult(
+                success = true,
+                model = discoveredList.first(),
+                message = "Key valid hai (${discoveredList.first()}), lekin abhi rate/quota limit active hai. Thodi der baad try karein."
+            )
+        }
+
+        val friendly = when (lastHttpCode) {
+            429 -> "Gemini API quota limit poori ho gayi hai. Thodi der baad try karein."
+            400, 401, 403 -> "API key invalid hai: $lastErrorMsg"
+            -1 -> "Internet connect nahi ho saka. Network check karein."
+            else -> "Gemini connect nahi ho saka ($lastHttpCode): $lastErrorMsg"
+        }
+        GeminiVerifyResult(success = false, message = friendly)
+    }
+
+    /**
+     * Multimodal audio understanding: sends 16kHz mono WAV to Gemini and gets structured
+     * wake verification + transcript + intent + natural reply in one low-latency round-trip.
+     */
+    suspend fun processVoiceAudio(
+        wavBytes: ByteArray,
+        requireWakeWord: Boolean,
+        isContinuousSession: Boolean
+    ): GeminiAudioResult = withContext(Dispatchers.IO) {
+        val apiKey = getApiKey()
+            ?: return@withContext GeminiAudioResult(false, errorMessage = "Gemini API key configured nahi hai.")
+
+        val audioBase64 = Base64.encodeToString(wavBytes, Base64.NO_WRAP)
+        val systemPrompt = buildStructuredSystemPrompt(requireWakeWord = requireWakeWord)
+
+        val instructionText = if (requireWakeWord) {
+            "Listen to this audio clip. Check if the speaker addressed 'Vector' (e.g. Hey Vector, Suno Vector, Vector, Ok Vector, Hey Victor). Return strict JSON only."
+        } else {
+            "Listen to this user voice command/question carefully and return strict JSON only."
+        }
+
+        val currentTurn = JSONObject().apply {
+            put("role", "user")
+            put("parts", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("inlineData", JSONObject().apply {
+                        put("mimeType", "audio/wav")
+                        put("data", audioBase64)
+                    })
+                })
+                put(JSONObject().apply {
+                    put("text", instructionText)
+                })
+            })
+        }
+
+        val turnsToSend = buildTurnsWithHistory(currentTurn, includeHistory = isContinuousSession)
+
+        val apiResp = callWithModelFallback(
+            apiKey = apiKey,
+            systemInstruction = systemPrompt,
+            contentsList = turnsToSend,
+            expectJson = true,
+            maxTokens = 768
+        )
+
+        if (!apiResp.isSuccess) {
+            return@withContext GeminiAudioResult(false, errorMessage = apiResp.text)
+        }
+
+        val decision = parseVoiceDecision(apiResp.text, defaultWake = !requireWakeWord)
+        if (decision.wake && decision.transcript.isNotBlank() && decision.intent != "wake_only") {
+            val replyText = decision.reply.ifBlank { "Action executed: ${decision.intent}" }
+            appendTurnToHistory(decision.transcript, replyText, keepHistory = isContinuousSession)
+        }
+
+        GeminiAudioResult(true, decision = decision)
+    }
+
+    /**
+     * Understands typed text or offline SpeechRecognizer transcript with smart intent extraction.
+     */
+    suspend fun processTextWithIntent(
+        userPrompt: String,
+        isContinuousSession: Boolean
+    ): VoiceDecision? = withContext(Dispatchers.IO) {
+        val apiKey = getApiKey() ?: return@withContext null
+        val systemPrompt = buildStructuredSystemPrompt(requireWakeWord = false)
+
+        val userTurn = JSONObject().apply {
+            put("role", "user")
+            put("parts", JSONArray().apply {
+                put(JSONObject().apply { put("text", userPrompt) })
+            })
+        }
+
+        val turnsToSend = buildTurnsWithHistory(userTurn, includeHistory = isContinuousSession)
+        val apiResp = callWithModelFallback(
+            apiKey = apiKey,
+            systemInstruction = systemPrompt,
+            contentsList = turnsToSend,
+            expectJson = true,
+            maxTokens = 768
+        )
+
+        if (!apiResp.isSuccess) {
+            return@withContext VoiceDecision(
+                wake = true,
+                transcript = userPrompt,
+                intent = "chat",
+                reply = apiResp.text
+            )
+        }
+
+        val decision = parseVoiceDecision(apiResp.text, defaultWake = true).let {
+            if (it.transcript.isBlank()) it.copy(transcript = userPrompt) else it
+        }
+        val replyText = decision.reply.ifBlank { "Done boss." }
+        appendTurnToHistory(userPrompt, replyText, keepHistory = isContinuousSession)
+        decision
+    }
+
+    /**
+     * Direct conversational query to Gemini (used for simple questions and legacy callers).
      */
     suspend fun askGemini(userPrompt: String, isContinuousSession: Boolean = false): String = withContext(Dispatchers.IO) {
         val apiKey = getApiKey()
-        if (apiKey.isNullOrBlank()) {
-            return@withContext "Gemini API key configure nahi hai. App settings mein ja kar apni Gemini key enter karein."
-        }
+            ?: return@withContext "Gemini API key configure nahi hai. Settings mein ja kar apni Gemini key enter karein."
 
         val memoriesSnippet = memoryManager.getFormattedMemoriesForPrompt()
         val systemInstruction = """
             You are Vector, an ultra-smart, loyal, futuristic Android voice assistant.
             $memoriesSnippet
             Guidelines:
-            1. Answer in natural conversational Roman Urdu (or friendly Urdu/English).
-            2. Keep responses brief (1-3 spoken sentences), perfect for speech audio output.
-            3. Do not include markdown asterisks (*, **), bullet points, or complex symbols, speak naturally like a human.
+            1. Answer in natural conversational Roman Urdu (or friendly Urdu/English matching the user's language).
+            2. Keep responses concise (1-3 spoken sentences), ideal for voice playback.
+            3. Do not include markdown asterisks (*, **), hashes (#), or bullet symbols.
         """.trimIndent()
 
         if (!isContinuousSession) {
             clearConversationHistory()
         }
 
-        // Add user turn to conversation history
         val userTurn = JSONObject().apply {
             put("role", "user")
             put("parts", JSONArray().apply {
-                put(JSONObject().apply {
-                    val textWithContext = if (conversationHistory.isEmpty()) {
-                        "$systemInstruction\n\nUser: $userPrompt"
-                    } else {
-                        userPrompt
-                    }
-                    put("text", textWithContext)
-                })
+                put(JSONObject().apply { put("text", userPrompt) })
             })
         }
-        conversationHistory.add(userTurn)
 
-        // Limit conversation history to last 10 messages
-        if (conversationHistory.size > 10) {
-            conversationHistory.removeAt(0)
+        val turnsToSend = buildTurnsWithHistory(userTurn, includeHistory = isContinuousSession)
+        val response = callWithModelFallback(
+            apiKey = apiKey,
+            systemInstruction = systemInstruction,
+            contentsList = turnsToSend,
+            expectJson = false,
+            maxTokens = 1024
+        )
+
+        if (response.isSuccess) {
+            appendTurnToHistory(userPrompt, response.text, keepHistory = isContinuousSession)
         }
-
-        val answer = callWithModelFallback(apiKey, conversationHistory)
-
-        // Add assistant response to history
-        val modelTurn = JSONObject().apply {
-            put("role", "model")
-            put("parts", JSONArray().apply {
-                put(JSONObject().apply { put("text", answer) })
-            })
-        }
-        conversationHistory.add(modelTurn)
-
-        return@withContext answer
+        return@withContext response.text
     }
 
-    /**
-     * Generates an attractive, catchy, and professional WhatsApp message
-     * for contacts based on a topic or occasion.
-     */
     suspend fun generateAttractiveWhatsAppMessage(topic: String): String = withContext(Dispatchers.IO) {
         val apiKey = getApiKey()
-        if (apiKey.isNullOrBlank()) {
-            return@withContext "Salam! Umeed hai aap khairiyat se honge. Ek zaroori update share karni thi: $topic. Tafseelat ke liye rabta farmayein!"
-        }
+            ?: return@withContext "Salam! Umeed hai aap khairiyat se honge. Ek zaroori update share karni thi: $topic. Tafseelat ke liye rabta farmayein!"
 
         val prompt = "Write a very attractive, warm, professional, and engaging WhatsApp message (in Roman Urdu / Urdu with polite emojis) about this topic: '$topic'. Keep it appealing, concise, and ready to send directly to friends, clients, or contacts. Do not add quotes."
         val singleTurn = listOf(JSONObject().apply {
@@ -145,15 +330,151 @@ class GeminiBrainClient(private val context: Context) {
                 put(JSONObject().apply { put("text", prompt) })
             })
         })
-        return@withContext callWithModelFallback(apiKey, singleTurn)
+
+        val res = callWithModelFallback(
+            apiKey = apiKey,
+            systemInstruction = "You write warm, polished WhatsApp messages ready to send.",
+            contentsList = singleTurn,
+            expectJson = false,
+            maxTokens = 512
+        )
+        return@withContext if (res.isSuccess) res.text
+        else "Salam! Umeed hai aap khairiyat se honge. Ek zaroori update share karni thi: $topic."
     }
 
-    fun discoverActiveModelFromGoogle(apiKey: String): String? {
+    private fun buildStructuredSystemPrompt(requireWakeWord: Boolean): String {
+        val memoriesSnippet = memoryManager.getFormattedMemoriesForPrompt()
+        return """
+            You are Vector, a loyal, intelligent Android voice companion supporting Roman Urdu, Urdu, Hindi, and English.
+            $memoriesSnippet
+            Output ONLY a valid JSON object with exactly these keys:
+            {
+              "wake": boolean,
+              "transcript": string,
+              "intent": string,
+              "target": string,
+              "message": string,
+              "reply": string
+            }
+
+            Rules:
+            1. Wake Detection:
+               ${if (requireWakeWord) {
+                   "- Set wake=true ONLY if the speaker addresses Vector (e.g. 'Hey Vector', 'Suno Vector', 'Vector', 'Ok Vector', 'Aye Vector', 'Hi Vector', or close phonetics like 'Hey Victor'). If unrelated background speech or silence, set wake=false, intent='none', transcript='', target='', message='', reply=''."
+               } else {
+                   "- Active listening mode: set wake=true unless audio is pure silence or unintelligible static (then wake=false)."
+               }}
+            2. 'transcript': Write clearly what the user said (strip the wake word prefix only if helpful, or keep full natural phrase).
+            3. 'intent': Choose the SINGLE best intent from:
+               - "wake_only": User ONLY said the wake phrase ("Hey Vector" / "Suno Vector") with no question/command yet. Set reply="".
+               - "torch_on" / "torch_off": Flashlight/torch/batti on or off.
+               - "time": Asking current clock time ("time kya hua", "kitne baje hain").
+               - "battery": Asking phone battery level.
+               - "volume_up" / "volume_down": Raise, lower, or mute phone volume.
+               - "call": Call or dial a contact/number. Put contact name or digits in 'target'.
+               - "whatsapp_single": Send WhatsApp message to one contact. Put contact name in 'target' and message content in 'message'.
+               - "whatsapp_bulk": Send AI WhatsApp campaign to multiple contacts. Put comma-separated names in 'target' and topic in 'message'.
+               - "youtube": Search or play video on YouTube. Put search query in 'message'.
+               - "open_app": Open/launch an Android app installed on the phone (e.g. "Instagram kholo", "Open WhatsApp"). Note: questions like "OpenAI kya hai?" are "chat", NOT "open_app"! Put app name in 'target'.
+               - "save_contact": Save a phone number to contacts. Put name in 'target' and digits in 'message'.
+               - "call_history": Check recent calls / missed calls.
+               - "vip_add": Add a contact to VIP siren alerts. Put contact name in 'target'.
+               - "memory_save": User asks Vector to remember a personal fact ("yaad rakho..."). Put the clean fact in 'message'.
+               - "memory_recall": User asks what Vector remembers about them.
+               - "memory_clear": Clear saved memories.
+               - "go_home" / "go_back" / "open_notifications" / "lock_screen": Phone navigation control.
+               - "continuous_start" / "continuous_stop": Start or stop hands-free continuous conversation mode.
+               - "chat": Any question, general conversation, advice, translation, news/knowledge, or request not matching a device command.
+            4. 'reply': For "chat", write a warm, natural 1-3 sentence spoken answer in the user's language (Roman Urdu or English), NO markdown (*, #) or bullets. For device commands, keep 'reply' short or empty.
+        """.trimIndent()
+    }
+
+    private fun buildTurnsWithHistory(currentTurn: JSONObject, includeHistory: Boolean): List<JSONObject> {
+        val list = ArrayList<JSONObject>()
+        if (includeHistory) {
+            synchronized(historyLock) {
+                list.addAll(conversationHistory)
+            }
+        }
+        list.add(currentTurn)
+        return list
+    }
+
+    private fun appendTurnToHistory(userText: String, modelText: String, keepHistory: Boolean) {
+        if (!keepHistory) return
+        synchronized(historyLock) {
+            conversationHistory.add(JSONObject().apply {
+                put("role", "user")
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply { put("text", userText) })
+                })
+            })
+            conversationHistory.add(JSONObject().apply {
+                put("role", "model")
+                put("parts", JSONArray().apply {
+                    put(JSONObject().apply { put("text", modelText) })
+                })
+            })
+            while (conversationHistory.size > 12) {
+                conversationHistory.removeAt(0)
+                if (conversationHistory.isNotEmpty()) {
+                    conversationHistory.removeAt(0)
+                }
+            }
+        }
+    }
+
+    private fun parseVoiceDecision(rawText: String, defaultWake: Boolean): VoiceDecision {
+        val json = extractJsonObject(rawText)
+        if (json != null) {
+            val wake = json.optBoolean("wake", defaultWake)
+            val transcript = json.optString("transcript", "").trim()
+            val intent = json.optString("intent", if (wake) "chat" else "none").trim().lowercase()
+            val target = json.optString("target", "").trim()
+            val message = json.optString("message", "").trim()
+            val reply = json.optString("reply", "").replace("*", "").replace("#", "").trim()
+            return VoiceDecision(wake, transcript, intent, target, message, reply)
+        }
+        val cleaned = rawText.replace("*", "").replace("#", "").trim()
+        return VoiceDecision(
+            wake = defaultWake,
+            transcript = "",
+            intent = "chat",
+            reply = cleaned
+        )
+    }
+
+    private fun extractJsonObject(raw: String): JSONObject? {
+        var cleaned = raw.trim()
+        if (cleaned.startsWith("```")) {
+            cleaned = cleaned.removePrefix("```json").removePrefix("```JSON").removePrefix("```")
+            val endFence = cleaned.lastIndexOf("```")
+            if (endFence >= 0) {
+                cleaned = cleaned.substring(0, endFence)
+            }
+            cleaned = cleaned.trim()
+        }
+        val firstBrace = cleaned.indexOf('{')
+        val lastBrace = cleaned.lastIndexOf('}')
+        if (firstBrace >= 0 && lastBrace > firstBrace) {
+            val candidate = cleaned.substring(firstBrace, lastBrace + 1)
+            return try {
+                JSONObject(candidate)
+            } catch (_: Exception) {
+                null
+            }
+        }
+        return null
+    }
+
+    fun discoverRankedModelsFromGoogle(apiKey: String): List<String> {
         var conn: HttpURLConnection? = null
+        val validModels = ArrayList<String>()
         try {
-            val url = URL("https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey")
+            val url = URL("https://generativelanguage.googleapis.com/v1beta/models")
             conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
+                setRequestProperty("x-goog-api-key", apiKey)
                 connectTimeout = 8000
                 readTimeout = 8000
             }
@@ -161,25 +482,29 @@ class GeminiBrainClient(private val context: Context) {
                 val responseStr = BufferedReader(InputStreamReader(conn.inputStream)).use { it.readText() }
                 val json = JSONObject(responseStr)
                 val models = json.optJSONArray("models")
-                if (models != null && models.length() > 0) {
-                    // 1. Look for flash model that supports generateContent
+                if (models != null) {
                     for (i in 0 until models.length()) {
                         val m = models.getJSONObject(i)
-                        val name = m.optString("name", "")
+                        val name = m.optString("name", "").removePrefix("models/")
                         val methods = m.optJSONArray("supportedGenerationMethods")
-                        val supportsGen = methods != null && (0 until methods.length()).any { methods.optString(it) == "generateContent" }
-                        if (supportsGen && name.contains("flash", ignoreCase = true)) {
-                            return name.removePrefix("models/")
-                        }
-                    }
-                    // 2. Fallback to any model supporting generateContent
-                    for (i in 0 until models.length()) {
-                        val m = models.getJSONObject(i)
-                        val name = m.optString("name", "")
-                        val methods = m.optJSONArray("supportedGenerationMethods")
-                        val supportsGen = methods != null && (0 until methods.length()).any { methods.optString(it) == "generateContent" }
-                        if (supportsGen) {
-                            return name.removePrefix("models/")
+                        val supportsGen = methods != null &&
+                            (0 until methods.length()).any { methods.optString(it) == "generateContent" }
+                        if (!supportsGen || name.isBlank()) continue
+
+                        val lower = name.lowercase()
+                        val isExcluded = lower.contains("tts") ||
+                            lower.contains("image") ||
+                            lower.contains("imagen") ||
+                            lower.contains("veo") ||
+                            lower.contains("embedding") ||
+                            lower.contains("aqa") ||
+                            lower.contains("robotics") ||
+                            lower.contains("computer-use") ||
+                            lower.contains("native-audio") ||
+                            lower.contains("live")
+
+                        if (!isExcluded && lower.contains("gemini")) {
+                            validModels.add(name)
                         }
                     }
                 }
@@ -189,70 +514,97 @@ class GeminiBrainClient(private val context: Context) {
         } finally {
             conn?.disconnect()
         }
-        return null
+
+        // Rank models: 2.5-flash > 2.5-flash-lite > 2.0-flash > other flash > non-exp > rest
+        return validModels.sortedBy { name ->
+            val lower = name.lowercase()
+            when {
+                lower == "gemini-2.5-flash" -> 0
+                lower == "gemini-2.5-flash-lite" -> 1
+                lower == "gemini-2.0-flash" -> 2
+                lower == "gemini-2.0-flash-lite" -> 3
+                lower.contains("flash") && !lower.contains("exp") && !lower.contains("preview") -> 4
+                lower.contains("flash") -> 5
+                !lower.contains("exp") -> 6
+                else -> 7
+            }
+        }
     }
 
-    private fun callWithModelFallback(apiKey: String, contentsList: List<JSONObject>): String {
+    private fun callWithModelFallback(
+        apiKey: String,
+        systemInstruction: String,
+        contentsList: List<JSONObject>,
+        expectJson: Boolean,
+        maxTokens: Int
+    ): ApiResponse {
         var workingModel = prefs.getString(KEY_WORKING_MODEL, null)
         if (workingModel.isNullOrBlank()) {
-            val discovered = discoverActiveModelFromGoogle(apiKey)
+            val discovered = discoverRankedModelsFromGoogle(apiKey).firstOrNull()
             if (!discovered.isNullOrBlank()) {
                 workingModel = discovered
                 setWorkingModel(discovered)
             }
         }
 
-        val modelsToTry = mutableListOf<String>()
+        val modelsToTry = LinkedHashSet<String>()
         if (!workingModel.isNullOrBlank()) modelsToTry.add(workingModel)
-        for (m in CANDIDATE_MODELS) {
-            if (!modelsToTry.contains(m)) modelsToTry.add(m)
-        }
+        modelsToTry.addAll(CANDIDATE_MODELS)
 
-        var lastError = "Gemini connect nahi ho saka."
+        var lastResponse = ApiResponse(false, -1, "Gemini connect nahi ho saka.")
 
         for (model in modelsToTry) {
-            val response = executeRequest(apiKey, model, contentsList)
+            val response = executeRequest(apiKey, model, systemInstruction, contentsList, expectJson, maxTokens)
             if (response.isSuccess) {
                 setWorkingModel(model)
                 Log.i(TAG, "Using working Gemini model: $model")
-                return response.text
-            } else {
-                lastError = response.text
-                if (response.httpCode == 404) {
-                    Log.w(TAG, "Model $model returned 404. Trying next fallback...")
-                    continue
-                } else {
-                    break
-                }
+                return response
             }
+            lastResponse = response
+            if (response.httpCode == 401 || response.httpCode == 403) {
+                return ApiResponse(false, response.httpCode, "Gemini API key invalid ya blocked hai. Settings mein key check karein.")
+            }
+            Log.w(TAG, "Model $model failed [${response.httpCode}]: ${response.text}")
         }
 
-        // If candidates failed with 404, query Google's live model catalog directly!
-        val liveModel = discoverActiveModelFromGoogle(apiKey)
-        if (!liveModel.isNullOrBlank() && !modelsToTry.contains(liveModel)) {
-            val finalResp = executeRequest(apiKey, liveModel, contentsList)
-            if (finalResp.isSuccess) {
+        // Last resort: query live catalog in case user key only exposes newer/regional model names
+        val liveModels = discoverRankedModelsFromGoogle(apiKey)
+        for (liveModel in liveModels) {
+            if (modelsToTry.contains(liveModel)) continue
+            val resp = executeRequest(apiKey, liveModel, systemInstruction, contentsList, expectJson, maxTokens)
+            if (resp.isSuccess) {
                 setWorkingModel(liveModel)
-                return finalResp.text
+                return resp
             }
+            lastResponse = resp
         }
 
-        return lastError
+        return lastResponse
     }
 
     private data class ApiResponse(val isSuccess: Boolean, val httpCode: Int, val text: String)
 
-    private fun executeRequest(apiKey: String, model: String, contentsList: List<JSONObject>): ApiResponse {
+    private fun executeRequest(
+        apiKey: String,
+        model: String,
+        systemInstruction: String,
+        contentsList: List<JSONObject>,
+        expectJson: Boolean,
+        maxTokens: Int,
+        allowThinkingConfig: Boolean = true,
+        allowJsonMime: Boolean = expectJson
+    ): ApiResponse {
         var conn: HttpURLConnection? = null
         try {
-            val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
+            val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent"
             val url = URL(endpoint)
             conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                setRequestProperty("x-goog-api-key", apiKey)
                 doOutput = true
-                connectTimeout = 12000
-                readTimeout = 12000
+                connectTimeout = 15000
+                readTimeout = 20000
             }
 
             val contentsArray = JSONArray()
@@ -260,26 +612,39 @@ class GeminiBrainClient(private val context: Context) {
                 contentsArray.put(turn)
             }
 
-            val rootJson = JSONObject().apply {
-                put("contents", contentsArray)
-                put("generationConfig", JSONObject().apply {
-                    put("temperature", 0.7)
-                    put("maxOutputTokens", 250)
-                })
+            val genConfig = JSONObject().apply {
+                put("temperature", if (expectJson) 0.35 else 0.7)
+                put("maxOutputTokens", maxTokens)
+                if (allowJsonMime) {
+                    put("responseMimeType", "application/json")
+                }
+                // Prevent Gemini 2.5+ thinking tokens from consuming output tokens & adding latency
+                if (allowThinkingConfig && (model.contains("2.5") || model.contains("3."))) {
+                    put("thinkingConfig", JSONObject().apply {
+                        put("thinkingBudget", 0)
+                    })
+                }
             }
 
-            OutputStreamWriter(conn.outputStream).use { writer ->
+            val rootJson = JSONObject().apply {
+                if (systemInstruction.isNotBlank()) {
+                    put("systemInstruction", JSONObject().apply {
+                        put("parts", JSONArray().apply {
+                            put(JSONObject().apply { put("text", systemInstruction) })
+                        })
+                    })
+                }
+                put("contents", contentsArray)
+                put("generationConfig", genConfig)
+            }
+
+            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
                 writer.write(rootJson.toString())
                 writer.flush()
             }
 
             val responseCode = conn.responseCode
-            val stream = if (responseCode == HttpURLConnection.HTTP_OK) {
-                conn.inputStream
-            } else {
-                conn.errorStream
-            }
-
+            val stream = if (responseCode == HttpURLConnection.HTTP_OK) conn.inputStream else conn.errorStream
             val responseStr = stream?.let { BufferedReader(InputStreamReader(it)).use { r -> r.readText() } } ?: ""
 
             if (responseCode == HttpURLConnection.HTTP_OK) {
@@ -290,19 +655,54 @@ class GeminiBrainClient(private val context: Context) {
                     val content = firstCandidate.optJSONObject("content")
                     val parts = content?.optJSONArray("parts")
                     if (parts != null && parts.length() > 0) {
-                        val text = parts.getJSONObject(0).optString("text", "Koi jawab nahi mila.")
-                        return ApiResponse(true, responseCode, text.replace("*", "").replace("#", "").trim())
+                        val sb = StringBuilder()
+                        for (i in 0 until parts.length()) {
+                            val p = parts.getJSONObject(i)
+                            if (p.optBoolean("thought", false)) continue
+                            val partText = p.optString("text", "")
+                            if (partText.isNotEmpty()) sb.append(partText)
+                        }
+                        val finalText = sb.toString().trim()
+                        if (finalText.isNotEmpty()) {
+                            val cleanOut = if (expectJson) finalText else finalText.replace("*", "").replace("#", "").trim()
+                            return ApiResponse(true, responseCode, cleanOut)
+                        }
+                    }
+                    val finishReason = firstCandidate.optString("finishReason", "")
+                    if (finishReason == "SAFETY") {
+                        return ApiResponse(false, responseCode, "Safety policy ki wajah se yeh jawab nahi diya ja sakta.")
                     }
                 }
-                return ApiResponse(false, responseCode, "Jawab samajh nahi aaya.")
+                return ApiResponse(false, responseCode, "Gemini se khali jawab mila.")
             } else {
                 val parsedError = try {
                     JSONObject(responseStr).optJSONObject("error")?.optString("message", "") ?: ""
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     ""
                 }
+
+                // Auto-retry if model rejects thinkingConfig or responseMimeType with HTTP 400
+                if (responseCode == 400 && (allowThinkingConfig || allowJsonMime) &&
+                    (parsedError.contains("thinking", ignoreCase = true) ||
+                        parsedError.contains("responseMimeType", ignoreCase = true) ||
+                        parsedError.contains("JSON", ignoreCase = true))
+                ) {
+                    conn.disconnect()
+                    conn = null
+                    return executeRequest(
+                        apiKey = apiKey,
+                        model = model,
+                        systemInstruction = systemInstruction,
+                        contentsList = contentsList,
+                        expectJson = expectJson,
+                        maxTokens = maxTokens,
+                        allowThinkingConfig = false,
+                        allowJsonMime = false
+                    )
+                }
+
                 val errorMsg = if (parsedError.isNotEmpty()) parsedError else "Gemini Error $responseCode"
-                Log.e(TAG, "Gemini Request failed on $model [$responseCode]: $errorMsg")
+                Log.e(TAG, "Gemini failed on $model [$responseCode]: $errorMsg")
                 return ApiResponse(false, responseCode, errorMsg)
             }
         } catch (e: Exception) {
