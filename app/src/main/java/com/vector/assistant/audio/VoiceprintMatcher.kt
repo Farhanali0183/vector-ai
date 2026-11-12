@@ -223,7 +223,8 @@ class VoiceprintMatcher(context: Context) {
         for (f in frames) {
             for (c in 0 until NUM_MFCC) mean[c] += f[c]
         }
-        for (c in 0 until NUM_MFCC) mean[c] /= frames.size
+        val frameCount = frames.size.toFloat()
+        for (c in 0 until NUM_MFCC) mean[c] = mean[c] / frameCount
 
         for (f in frames) {
             for (c in 0 until NUM_MFCC) f[c] -= mean[c]
@@ -241,7 +242,8 @@ class VoiceprintMatcher(context: Context) {
         for (f in frames) {
             for (i in 0 until NUM_MFCC) mean[i] += f[i]
         }
-        for (i in 0 until NUM_MFCC) mean[i] /= frames.size
+        val frameCount = frames.size.toFloat()
+        for (i in 0 until NUM_MFCC) mean[i] = mean[i] / frameCount
 
         val std = FloatArray(NUM_MFCC)
         for (f in frames) {
