@@ -4,7 +4,10 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Base64
 import android.util.Log
+import com.vector.assistant.automation.UiStepDecision
+import com.vector.assistant.automation.WhatsAppChatAgent
 import com.vector.assistant.model.VoiceDecision
+import com.vector.assistant.service.VectorAccessibilityService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -190,9 +193,9 @@ class GeminiBrainClient(private val context: Context) {
         val systemPrompt = buildStructuredSystemPrompt(requireWakeWord = requireWakeWord)
 
         val instructionText = if (requireWakeWord) {
-            "Listen to this audio clip. Check if the speaker addressed 'Vector' (e.g. Hey Vector, Suno Vector, Vector, Ok Vector, Hey Victor). Return strict JSON only."
+            "Listen carefully. Set wake=true if speaker addresses 'Vector' (Hey Vector, Suno Vector, Vector, Ok Vector) OR gives a direct voice command after screen wake. Return strict JSON only."
         } else {
-            "Listen to this user voice command/question carefully and return strict JSON only."
+            "Continuous live chat active: transcribe clearly and return strict JSON intent. If pure ambient noise/unrelated background TV chatter, set wake=false."
         }
 
         val currentTurn = JSONObject().apply {
@@ -342,11 +345,99 @@ class GeminiBrainClient(private val context: Context) {
         else "Salam! Umeed hai aap khairiyat se honge. Ek zaroori update share karni thi: $topic."
     }
 
+    /**
+     * Autonomous UI Navigator: inspects live screen elements [id] and selects the exact next action
+     * to accomplish multi-step goals inside YouTube, Spotify, Chrome, WhatsApp, Settings, etc.
+     */
+    suspend fun decideNextUiStep(
+        goal: String,
+        step: Int,
+        uiSummary: String,
+        previousActions: List<String>
+    ): UiStepDecision = withContext(Dispatchers.IO) {
+        val apiKey = getApiKey()
+            ?: return@withContext UiStepDecision("failed", "none", -1, "", "Gemini API key missing hai.")
+
+        val historyBlock = if (previousActions.isEmpty()) "None yet." else previousActions.joinToString("\n")
+        val sysPrompt = """
+            You are an Android UI Automation Agent controlling apps via Accessibility elements.
+            Analyze the user's goal and current screen elements, then output ONLY valid JSON:
+            {
+              "status": "continue" | "done" | "failed",
+              "action": "click" | "type_and_send" | "scroll_down" | "scroll_up" | "back" | "wait" | "none",
+              "node_id": integer,
+              "text": string,
+              "reply": string
+            }
+
+            Rules:
+            - Never click "Sponsored" ads unless asked. Skip bottom nav chrome if looking for content.
+            - To type in a search bar: if you see an INPUT [id], use status="continue", action="type_and_send" with that node_id and query in "text". If you only see a Search icon button [id] and NO INPUT box yet, set status="continue", action="click" on that Search button first.
+            - When clicking a video/song/link/switch finishes the user's final goal (e.g. clicking the matching YouTube video or toggling Wi-Fi on), set status="done", action="click", node_id=<id>, and put a short Roman Urdu confirmation in "reply". If the goal is ALREADY visibly completed on screen (e.g. video player is open or switch already shows checked=true), set status="done", action="none".
+            - Keep "reply" concise (1 spoken Roman Urdu sentence).
+        """.trimIndent()
+
+        val userMsg = """
+            Goal: $goal
+            Step: $step
+            Previous Actions:
+            $historyBlock
+
+            Current Screen UI:
+            $uiSummary
+        """.trimIndent()
+
+        val turn = listOf(JSONObject().apply {
+            put("role", "user")
+            put("parts", JSONArray().apply {
+                put(JSONObject().apply { put("text", userMsg) })
+            })
+        })
+
+        val res = callWithModelFallback(
+            apiKey = apiKey,
+            systemInstruction = sysPrompt,
+            contentsList = turn,
+            expectJson = true,
+            maxTokens = 320
+        )
+
+        if (!res.isSuccess) {
+            return@withContext UiStepDecision("failed", "none", -1, "", res.text)
+        }
+
+        val json = extractJsonObject(res.text)
+        if (json != null) {
+            return@withContext UiStepDecision(
+                status = json.optString("status", "failed").lowercase().trim(),
+                action = json.optString("action", "none").lowercase().trim(),
+                nodeId = json.optInt("node_id", -1),
+                text = json.optString("text", "").trim(),
+                reply = json.optString("reply", "").replace("*", "").replace("#", "").trim()
+            )
+        }
+
+        UiStepDecision("failed", "none", -1, "", "Screen action samajh nahi aayi.")
+    }
+
     private fun buildStructuredSystemPrompt(requireWakeWord: Boolean): String {
         val memoriesSnippet = memoryManager.getFormattedMemoriesForPrompt()
+        val chatContext = WhatsAppChatAgent.getPromptContextSummary()
+        val screenContext = try {
+            VectorAccessibilityService.instance?.captureScreenContext(850).orEmpty()
+        } catch (_: Exception) {
+            ""
+        }
+
+        val liveContextBlock = buildString {
+            if (chatContext.isNotBlank()) append(chatContext).append("\n")
+            if (screenContext.isNotBlank()) append(screenContext).append("\n")
+        }.trim()
+
         return """
-            You are Vector, a loyal, intelligent Android voice companion supporting Roman Urdu, Urdu, Hindi, and English.
+            You are Vector, a next-generation hands-free Android AI Operator & Companion supporting Roman Urdu, Urdu, Hindi, and English.
             $memoriesSnippet
+            ${if (liveContextBlock.isNotEmpty()) "Live Device Context:\n$liveContextBlock" else ""}
             Output ONLY a valid JSON object with exactly these keys:
             {
               "wake": boolean,
@@ -362,20 +453,28 @@ class GeminiBrainClient(private val context: Context) {
                ${if (requireWakeWord) {
                    "- Set wake=true ONLY if the speaker addresses Vector (e.g. 'Hey Vector', 'Suno Vector', 'Vector', 'Ok Vector', 'Aye Vector', 'Hi Vector', or close phonetics like 'Hey Victor'). If unrelated background speech or silence, set wake=false, intent='none', transcript='', target='', message='', reply=''."
                } else {
-                   "- Active listening mode: set wake=true unless audio is pure silence or unintelligible static (then wake=false)."
+                   "- Continuous live mode: set wake=true for ANY command, reply, follow-up ('haan', 'is ka reply do', 'sweet sa msg karo'), question, or request. Set wake=false ONLY if audio is silence, noise, or background TV chatter clearly NOT meant for Vector."
                }}
-            2. 'transcript': Write clearly what the user said (strip the wake word prefix only if helpful, or keep full natural phrase).
+            2. 'transcript': Write clearly what the user said.
             3. 'intent': Choose the SINGLE best intent from:
                - "wake_only": User ONLY said the wake phrase ("Hey Vector" / "Suno Vector") with no question/command yet. Set reply="".
                - "torch_on" / "torch_off": Flashlight/torch/batti on or off.
-               - "time": Asking current clock time ("time kya hua", "kitne baje hain").
+               - "time": Asking current clock time.
                - "battery": Asking phone battery level.
                - "volume_up" / "volume_down": Raise, lower, or mute phone volume.
                - "call": Call or dial a contact/number. Put contact name or digits in 'target'.
-               - "whatsapp_single": Send WhatsApp message to one contact. Put contact name in 'target' and message content in 'message'.
+               - "whatsapp_single": Start a WhatsApp message to a named contact (e.g. "Ali ko hy ka message bhejo", "Ahmed ko koi pyara sa msg karo"). Put contact name in 'target' and the actual ready-to-send message text in 'message' (write a warm/sweet message yourself if user asks for a sweet/nice message!).
+               - "whatsapp_reply": Reply to an incoming/active WhatsApp chat OR send a requested message to the current/latest sender (e.g. "is ka reply do", "haan jawab de do", "use sweet sa message karo", "bolo main abhi busy hoon"). Put recipient name in 'target' (use Latest Incoming Chat Sender or Last Messaged Contact from Live Device Context if user says "is ko"/"us ko"), and put the COMPLETE crafted reply text in 'message'!
                - "whatsapp_bulk": Send AI WhatsApp campaign to multiple contacts. Put comma-separated names in 'target' and topic in 'message'.
-               - "youtube": Search or play video on YouTube. Put search query in 'message'.
-               - "open_app": Open/launch an Android app installed on the phone (e.g. "Instagram kholo", "Open WhatsApp"). Note: questions like "OpenAI kya hai?" are "chat", NOT "open_app"! Put app name in 'target'.
+               - "youtube": Search ONLY on YouTube without auto-playing (e.g. "YouTube par news search karo"). Put query in 'message'.
+               - "youtube_play": Search AND actually play/open a video/song/naat on YouTube (e.g. "YouTube par Atif Aslam ka gana play karo", "Pasoori song lagao YouTube par", "koi funny video chalao"). Put search query in 'message'.
+               - "open_app": ONLY launch an app with no further in-app task (e.g. "Instagram kholo").
+               - "app_task": Multi-step autonomous task INSIDE an app — EITHER opening an app and completing tasks inside it ("Spotify khol kar Atif Aslam chalao", "Chrome mein cricket score search karke pehla link kholo", "Settings khol kar Wi-Fi on karo", "WhatsApp open karke Ali ko search karke hy likho") OR acting on the currently open screen ("pehli video play karo", "is par click karo", "search box mein ... likh kar chalao"). Put app name in 'target' (or "" if user means the currently open screen!) and put the complete clear goal in 'message'.
+               - "media_control": Control currently playing video/music or ads ("play", "pause", "roko", "resume", "next video", "agla gana", "previous", "skip ad"). Put 'target' as one of: "play_pause", "next", "previous", "skip_ad".
+               - "read_screen": User asks what is currently on screen / read the open chat or page ("screen par kya hai", "message parho").
+               - "app_click": Click/tap an item, button, tab, contact, or video currently visible on screen (put exact or partial visible label in 'target').
+               - "app_type": Type and send/search text inside whatever app is currently open (put exact text in 'message').
+               - "app_scroll": Scroll the open app screen ('target' = "down" or "up").
                - "save_contact": Save a phone number to contacts. Put name in 'target' and digits in 'message'.
                - "call_history": Check recent calls / missed calls.
                - "vip_add": Add a contact to VIP siren alerts. Put contact name in 'target'.
@@ -383,9 +482,9 @@ class GeminiBrainClient(private val context: Context) {
                - "memory_recall": User asks what Vector remembers about them.
                - "memory_clear": Clear saved memories.
                - "go_home" / "go_back" / "open_notifications" / "lock_screen": Phone navigation control.
-               - "continuous_start" / "continuous_stop": Start or stop hands-free continuous conversation mode.
-               - "chat": Any question, general conversation, advice, translation, news/knowledge, or request not matching a device command.
-            4. 'reply': For "chat", write a warm, natural 1-3 sentence spoken answer in the user's language (Roman Urdu or English), NO markdown (*, #) or bullets. For device commands, keep 'reply' short or empty.
+               - "continuous_start" / "continuous_stop": Enable or disable Continuous Live Chat mode.
+               - "chat": Any question, general conversation, advice, translation, or request not matching a device/app command.
+            4. 'reply': Keep 'reply' concise (1-2 spoken sentences) in Roman Urdu/English matching the user, NO markdown (*, #).
         """.trimIndent()
     }
 

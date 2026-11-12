@@ -1,6 +1,7 @@
 package com.vector.assistant.service
 
 import android.Manifest
+import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -19,6 +20,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -42,11 +44,11 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 
 /**
- * 24/7 Screen-Off Foreground Service with:
- * - Partial WakeLock + WifiLock (keeps mic + Gemini network alive when screen is locked/off)
- * - Continuous single-lifecycle AudioRecord (no background mic restart failures on Android 13/14)
- * - Hands-free "Hey Vector" / "Suno Vector" wake detection (Local MFCC-DTW + Gemini Multimodal Audio)
- * - Zero self-echo TTS gating & optional Floating Overlay HUD
+ * 24/7 Next-Gen Screen-Off & Always-Live Voice Service:
+ * - Partial WakeLock + WifiLock + Bright Screen Wake on Voice
+ * - Persistent Always-On Live Chat mode (no repeated mic taps, no repeated wake word needed)
+ * - Smart Fallback to "Hey Vector" / "Suno Vector" wake mode when Live Chat is toggled OFF
+ * - Live Incoming WhatsApp Reply announcer + hands-free Direct Reply pipeline
  */
 class VectorVoiceService : Service() {
 
@@ -57,6 +59,11 @@ class VectorVoiceService : Service() {
         const val ACTION_TOGGLE_CONTINUOUS = "ACTION_TOGGLE_CONTINUOUS"
         const val ACTION_TEXT_COMMAND = "ACTION_TEXT_COMMAND"
         const val EXTRA_TEXT_COMMAND = "extra_text_command"
+        const val ACTION_INCOMING_CHAT_ALERT = "ACTION_INCOMING_CHAT_ALERT"
+        const val EXTRA_ALERT_SENDER = "extra_alert_sender"
+        const val EXTRA_ALERT_MESSAGE = "extra_alert_message"
+        const val EXTRA_ALERT_IS_VIP = "extra_alert_is_vip"
+        const val ACTION_REFRESH_SETTINGS = "ACTION_REFRESH_SETTINGS"
 
         const val CHANNEL_ID = "vector_voice_channel"
         const val NOTIFICATION_ID = 1001
@@ -123,7 +130,7 @@ class VectorVoiceService : Service() {
                         overlayManager.showOrUpdate(VectorState.SPEAKING, "VECTOR", lastReply)
                     }
                 } else {
-                    audioRecorderManager.setInputMuted(false, tailGuardMs = 380L)
+                    audioRecorderManager.setInputMuted(false, tailGuardMs = 420L)
                     if (!commandExecutor.isContinuousChatActive &&
                         !isProcessingTurn &&
                         !isUsingOfflineSpeechRecognizer &&
@@ -149,7 +156,16 @@ class VectorVoiceService : Service() {
             },
             onCycleComplete = {
                 mainHandler.post {
-                    returnToWakeListen()
+                    if (commandExecutor.isContinuousChatActive) {
+                        startDirectCommandCapture(speakPrompt = false)
+                    } else {
+                        returnToWakeListen()
+                    }
+                }
+            },
+            onWakeScreenRequested = { dismissLock ->
+                mainHandler.post {
+                    wakeScreenIfEnabled(dismissLockScreen = dismissLock)
                 }
             }
         )
@@ -162,11 +178,11 @@ class VectorVoiceService : Service() {
             onCommandTimeout = {
                 mainHandler.post {
                     if (commandExecutor.isContinuousChatActive) {
-                        commandExecutor.stopContinuousChat(speakConfirmation = false)
-                        isContinuousChatActive = false
-                        broadcastLog("Live Chat: Paused due to silence. Wake mode active.")
+                        // In Always-On Live Chat we stay in continuous mode unless explicitly paused
+                        startDirectCommandCapture(speakPrompt = false)
+                    } else {
+                        returnToWakeListen()
                     }
-                    returnToWakeListen()
                 }
             },
             onAudioLevel = { level ->
@@ -198,6 +214,23 @@ class VectorVoiceService : Service() {
                 }
                 return if (isServiceRunning) START_STICKY else START_NOT_STICKY
             }
+
+            ACTION_INCOMING_CHAT_ALERT -> {
+                val sender = intent.getStringExtra(EXTRA_ALERT_SENDER)?.trim().orEmpty()
+                val msg = intent.getStringExtra(EXTRA_ALERT_MESSAGE)?.trim().orEmpty()
+                val isVip = intent.getBooleanExtra(EXTRA_ALERT_IS_VIP, false)
+                if (isServiceRunning && sender.isNotEmpty() && msg.isNotEmpty()) {
+                    handleIncomingChatAlert(sender, msg, isVip)
+                }
+                return if (isServiceRunning) START_STICKY else START_NOT_STICKY
+            }
+
+            ACTION_REFRESH_SETTINGS -> {
+                if (isServiceRunning) {
+                    applyPreferredListeningMode(announce = false)
+                }
+                return if (isServiceRunning) START_STICKY else START_NOT_STICKY
+            }
         }
 
         if (intent == null && settings.userExplicitlyPaused) {
@@ -205,7 +238,6 @@ class VectorVoiceService : Service() {
             return START_NOT_STICKY
         }
 
-        // Verify microphone permission before starting foreground microphone service
         val hasMicPermission = ContextCompat.checkSelfPermission(
             this, Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
@@ -235,26 +267,70 @@ class VectorVoiceService : Service() {
                 settings.serviceWasRunning = true
                 audioRecorderManager.startListening()
                 if (commandExecutor.isContinuousChatActive) {
-                    commandExecutor.stopContinuousChat(speakConfirmation = true)
+                    commandExecutor.stopContinuousChat(speakConfirmation = true, persistDisable = true)
                     isContinuousChatActive = false
                     broadcastLog("Live Chat: Switched OFF")
                 } else {
                     isContinuousChatActive = true
-                    commandExecutor.startContinuousChat()
+                    commandExecutor.startContinuousChat(silent = false)
                 }
             }
 
             else -> {
                 settings.userExplicitlyPaused = false
                 settings.serviceWasRunning = true
-                audioRecorderManager.setCaptureMode(AudioRecorderManager.CaptureMode.WAKE_LISTEN)
                 audioRecorderManager.startListening()
-                returnToWakeListen()
-                broadcastLog("Vector Active! Hands-free 'Hey Vector' / 'Suno Vector' & Screen-Off ready.")
+                applyPreferredListeningMode(announce = false)
             }
         }
 
         return START_STICKY
+    }
+
+    private fun applyPreferredListeningMode(announce: Boolean) {
+        if (settings.isAutoContinuousChat && commandExecutor.geminiBrain.isConnected()) {
+            isContinuousChatActive = true
+            commandExecutor.startContinuousChat(silent = !announce)
+            broadcastLog("Vector Active! Always-On Live Chat Ready (No mic click, no wake word needed).")
+        } else {
+            if (commandExecutor.isContinuousChatActive && !settings.isAutoContinuousChat) {
+                commandExecutor.stopContinuousChat(speakConfirmation = false)
+            }
+            isContinuousChatActive = false
+            returnToWakeListen()
+            broadcastLog("Vector Active! Hands-free 'Hey Vector' / 'Suno Vector' & Screen-Off ready.")
+        }
+    }
+
+    private fun handleIncomingChatAlert(sender: String, msg: String, isVip: Boolean) {
+        if (isProcessingTurn || speaker.isSpeakingNow) {
+            mainHandler.postDelayed({
+                if (isServiceRunning) handleIncomingChatAlert(sender, msg, isVip)
+            }, 2200L)
+            return
+        }
+
+        wakeScreenIfEnabled(dismissLockScreen = false)
+        audioRecorderManager.setInputMuted(true)
+        val badge = if (isVip) "VIP • $sender" else "WhatsApp • $sender"
+        val displayLine = "WhatsApp par $sender ka message: \"$msg\""
+        VectorSessionState.addVectorMessage(displayLine, badge = badge)
+        broadcastLog("📩 Incoming WhatsApp from $sender: $msg")
+
+        if (!isMainActivityVisible) {
+            overlayManager.showOrUpdate(VectorState.SPEAKING, "WHATSAPP • $sender", msg)
+        }
+
+        val spoken = "Boss, WhatsApp par $sender ka message aaya hai: $msg. Kya main reply doon?"
+        speaker.speak(spoken) {
+            if (!isServiceRunning) return@speak
+            if (commandExecutor.geminiBrain.isConnected()) {
+                // Immediately stay ready to hear user's reply ("haan reply do" / "sweet sa msg karo")
+                startDirectCommandCapture(speakPrompt = false)
+            } else {
+                returnToWakeListen()
+            }
+        }
     }
 
     private fun ensureForegroundAndLocks(): Boolean {
@@ -274,7 +350,6 @@ class VectorVoiceService : Service() {
             }
         }
 
-        // Keep CPU awake when screen is off
         if (wakeLock == null) {
             val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
             wakeLock = powerManager?.newWakeLock(
@@ -288,7 +363,6 @@ class VectorVoiceService : Service() {
             wakeLock?.acquire()
         }
 
-        // Keep Wi-Fi responsive when screen is off so Gemini API calls succeed instantly
         if (wifiLock == null) {
             try {
                 val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
@@ -313,7 +387,7 @@ class VectorVoiceService : Service() {
     private fun handleCapturedUtterance(pcm: ShortArray, isDirectCommand: Boolean) {
         if (!isServiceRunning || isProcessingTurn) return
 
-        // 1. Optional Biometrics Speaker Lock (only enforced when user enabled Strict Voice Lock)
+        // 1. Optional Biometrics Speaker Lock
         if (voiceprintMatcher.isBiometricsEnforced() && voiceprintMatcher.isProfileEnrolled()) {
             val score = voiceprintMatcher.matchScore(pcm)
             if (score < voiceprintMatcher.verificationThreshold) {
@@ -326,6 +400,10 @@ class VectorVoiceService : Service() {
         val geminiConnected = commandExecutor.geminiBrain.isConnected()
 
         if (isDirectCommand) {
+            val continuous = commandExecutor.isContinuousChatActive
+            val now = System.currentTimeMillis()
+            if (continuous && now < cooldownUntilMs) return
+
             isProcessingTurn = true
             audioRecorderManager.setInputMuted(true)
             VectorSessionState.setState(VectorState.THINKING, "Thinking...")
@@ -340,22 +418,34 @@ class VectorVoiceService : Service() {
                         val res = commandExecutor.geminiBrain.processVoiceAudio(
                             wavBytes = wav,
                             requireWakeWord = false,
-                            isContinuousSession = commandExecutor.isContinuousChatActive
+                            isContinuousSession = continuous
                         )
                         isProcessingTurn = false
-                        audioRecorderManager.setInputMuted(false, tailGuardMs = 250L)
+                        audioRecorderManager.setInputMuted(false, tailGuardMs = 260L)
 
                         if (res.isApiSuccess && res.decision != null) {
                             val d = res.decision
                             if (!d.wake || (d.transcript.isBlank() && d.intent != "wake_only")) {
-                                broadcastLog("No clear speech detected.")
-                                if (commandExecutor.isContinuousChatActive) {
+                                if (continuous) {
+                                    consecutiveNonWakeCount++
+                                    if (consecutiveNonWakeCount >= 5) {
+                                        consecutiveNonWakeCount = 0
+                                        cooldownUntilMs = System.currentTimeMillis() + 5000L
+                                    }
                                     startDirectCommandCapture(speakPrompt = false)
                                 } else {
+                                    broadcastLog("No clear speech detected.")
                                     returnToWakeListen()
                                 }
                             } else {
-                                commandExecutor.executeDecision(d)
+                                consecutiveNonWakeCount = 0
+                                cooldownUntilMs = 0L
+                                wakeScreenIfEnabled(dismissLockScreen = false)
+                                if (d.intent == "wake_only") {
+                                    startDirectCommandCapture(speakPrompt = true)
+                                } else {
+                                    commandExecutor.executeDecision(d)
+                                }
                             }
                         } else {
                             broadcastLog("Gemini Error: ${res.errorMessage}")
@@ -363,14 +453,22 @@ class VectorVoiceService : Service() {
                             else "Internet ya Gemini connection mein masla aaya."
                             VectorSessionState.addVectorMessage(errReply, badge = "Connection")
                             speaker.speak(errReply) {
-                                returnToWakeListen()
+                                if (commandExecutor.isContinuousChatActive) {
+                                    startDirectCommandCapture(speakPrompt = false)
+                                } else {
+                                    returnToWakeListen()
+                                }
                             }
                         }
                     } catch (e: Exception) {
                         isProcessingTurn = false
                         audioRecorderManager.setInputMuted(false)
                         broadcastLog("Audio processing error: ${e.message}")
-                        returnToWakeListen()
+                        if (commandExecutor.isContinuousChatActive) {
+                            startDirectCommandCapture(speakPrompt = false)
+                        } else {
+                            returnToWakeListen()
+                        }
                     }
                 }
             } else {
@@ -385,10 +483,9 @@ class VectorVoiceService : Service() {
             return
         }
 
-        // BACKGROUND WAKE MODE
+        // BACKGROUND WAKE MODE (when Live Chat is OFF)
         val isLocalWake = voiceprintMatcher.isProfileEnrolled() && voiceprintMatcher.isWakePhraseMatch(pcm)
 
-        // If Gemini is NOT connected:
         if (!geminiConnected) {
             if (isLocalWake) {
                 wakeUpAndListenForOfflineCommand()
@@ -396,8 +493,6 @@ class VectorVoiceService : Service() {
             return
         }
 
-        // If Gemini IS connected:
-        // If user turned OFF Smart Hybrid Wake, require local trained wake sample match before calling Gemini
         if (!settings.isSmartHybridWakeEnabled && !isLocalWake) {
             return
         }
@@ -434,7 +529,6 @@ class VectorVoiceService : Service() {
 
                 val decision = res.decision
                 if (!decision.wake) {
-                    // Unrelated speech in room — stay silent and protect quota
                     lastNonWakeCheckMs = System.currentTimeMillis()
                     consecutiveNonWakeCount++
                     if (consecutiveNonWakeCount >= 5) {
@@ -446,10 +540,9 @@ class VectorVoiceService : Service() {
                     return@launch
                 }
 
-                // Confirmed Wake Word!
                 consecutiveNonWakeCount = 0
                 cooldownUntilMs = 0L
-                wakeScreenIfEnabled()
+                wakeScreenIfEnabled(dismissLockScreen = false)
 
                 if (decision.intent == "wake_only" || (decision.transcript.isBlank() && decision.reply.isBlank())) {
                     broadcastLog("Wake word detected! Listening for your command...")
@@ -477,42 +570,44 @@ class VectorVoiceService : Service() {
     private fun startDirectCommandCapture(speakPrompt: Boolean) {
         if (!isServiceRunning) return
         isProcessingTurn = false
-        wakeScreenIfEnabled()
 
-        if (!isMainActivityVisible) {
-            overlayManager.showOrUpdate(VectorState.LISTENING_COMMAND, "VECTOR", "Listening... Bolen!")
-        }
+        val continuous = commandExecutor.isContinuousChatActive
+        val captureTimeoutMs = if (continuous) 0L else 9000L
 
         if (!commandExecutor.geminiBrain.isConnected()) {
-            // Without Gemini API key, use Android SpeechRecognizer when screen is interactive
+            wakeScreenIfEnabled(dismissLockScreen = false)
             launchOfflineSpeechRecognizer(speakPrompt)
             return
         }
 
         if (speakPrompt) {
+            wakeScreenIfEnabled(dismissLockScreen = false)
             playWakeChime()
             audioRecorderManager.setInputMuted(true)
             VectorSessionState.setState(VectorState.SPEAKING, "Yes boss?")
             speaker.speak("Yes boss?") {
                 if (isServiceRunning) {
-                    audioRecorderManager.setCaptureMode(AudioRecorderManager.CaptureMode.DIRECT_COMMAND, 7500L)
+                    audioRecorderManager.setCaptureMode(AudioRecorderManager.CaptureMode.DIRECT_COMMAND, captureTimeoutMs)
                     audioRecorderManager.setInputMuted(false, tailGuardMs = 260L)
-                    VectorSessionState.setState(VectorState.LISTENING_COMMAND, "Listening for your command...")
-                    broadcastLog("🎤 Listening for your command...")
+                    val subtitle = if (continuous) "Live Chat Active — Bolen (no wake word needed)" else "Listening for your command..."
+                    VectorSessionState.setState(VectorState.LISTENING_COMMAND, subtitle)
+                    broadcastLog("🎤 $subtitle")
                 }
             }
         } else {
-            playWakeChime()
-            audioRecorderManager.setCaptureMode(AudioRecorderManager.CaptureMode.DIRECT_COMMAND, 8000L)
-            audioRecorderManager.setInputMuted(false, tailGuardMs = 220L)
-            VectorSessionState.setState(VectorState.LISTENING_COMMAND, "Listening... Speak now")
-            broadcastLog("🎤 Listening...")
+            audioRecorderManager.setCaptureMode(AudioRecorderManager.CaptureMode.DIRECT_COMMAND, captureTimeoutMs)
+            audioRecorderManager.setInputMuted(false, tailGuardMs = 240L)
+            val subtitle = if (continuous) "Live Chat Open — Bolen..." else "Listening... Speak now"
+            VectorSessionState.setState(VectorState.LISTENING_COMMAND, subtitle)
+            if (!isMainActivityVisible && continuous) {
+                overlayManager.scheduleAutoHide(2400L)
+            }
         }
     }
 
     private fun wakeUpAndListenForOfflineCommand() {
         mainHandler.post {
-            wakeScreenIfEnabled()
+            wakeScreenIfEnabled(dismissLockScreen = false)
             broadcastLog("Offline Wake Word verified!")
             launchOfflineSpeechRecognizer(speakPrompt = true)
         }
@@ -620,6 +715,10 @@ class VectorVoiceService : Service() {
         }
         isProcessingTurn = false
         isContinuousChatActive = commandExecutor.isContinuousChatActive
+        if (isContinuousChatActive && commandExecutor.geminiBrain.isConnected()) {
+            startDirectCommandCapture(speakPrompt = false)
+            return
+        }
         audioRecorderManager.setCaptureMode(AudioRecorderManager.CaptureMode.WAKE_LISTEN)
         audioRecorderManager.setInputMuted(false, tailGuardMs = 300L)
         val subtitle = if (commandExecutor.geminiBrain.isConnected()) {
@@ -633,17 +732,30 @@ class VectorVoiceService : Service() {
         overlayManager.scheduleAutoHide(2400L)
     }
 
-    private fun wakeScreenIfEnabled() {
-        if (!settings.isWakeScreenOnCommand) return
+    private fun wakeScreenIfEnabled(dismissLockScreen: Boolean = false) {
+        if (!settings.isWakeScreenOnCommand && !dismissLockScreen) return
         try {
             val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
-            if (!powerManager.isInteractive) {
+            val wasOff = !powerManager.isInteractive
+            if (wasOff) {
                 @Suppress("DEPRECATION")
                 val screenWakeLock = powerManager.newWakeLock(
-                    PowerManager.SCREEN_DIM_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                        PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                        PowerManager.ON_AFTER_RELEASE,
                     "VectorAssistant::ScreenWakeLock"
                 )
-                screenWakeLock.acquire(5000L)
+                screenWakeLock.acquire(12000L)
+            }
+
+            // If a visual/in-app task is requested while device is off/locked, bring Vector Activity up to request keyguard dismiss cleanly
+            val km = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+            if (dismissLockScreen && (wasOff || km?.isKeyguardLocked == true) && Settings.canDrawOverlays(this)) {
+                val wakeActivity = Intent(this, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    putExtra(MainActivity.EXTRA_DISMISS_KEYGUARD, true)
+                }
+                startActivity(wakeActivity)
             }
         } catch (_: Exception) {
         }
@@ -690,7 +802,7 @@ class VectorVoiceService : Service() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Vector AI is Active")
-            .setContentText("Listening for 'Hey Vector' / 'Suno Vector' (Screen-Off Ready)")
+            .setContentText("Always-On Live Chat & Screen-Off Voice Ready")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(openPi)
             .addAction(android.R.drawable.ic_btn_speak_now, "Listen Now", listenPi)

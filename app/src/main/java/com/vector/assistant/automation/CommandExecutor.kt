@@ -12,9 +12,11 @@ import android.os.BatteryManager
 import android.provider.CallLog
 import android.provider.ContactsContract
 import android.util.Log
+import android.view.KeyEvent
 import com.vector.assistant.ai.GeminiBrainClient
 import com.vector.assistant.audio.VoiceSpeaker
 import com.vector.assistant.model.VectorSessionState
+import com.vector.assistant.model.VectorSettings
 import com.vector.assistant.model.VoiceDecision
 import com.vector.assistant.service.VectorAccessibilityService
 import com.vector.assistant.service.VectorNotificationListenerService
@@ -39,12 +41,15 @@ class CommandExecutor(
     private val speaker: VoiceSpeaker,
     private val onLog: (String) -> Unit,
     private val onContinuousChatNextTurn: (() -> Unit)? = null,
-    private val onCycleComplete: (() -> Unit)? = null
+    private val onCycleComplete: (() -> Unit)? = null,
+    private val onWakeScreenRequested: ((dismissLockScreen: Boolean) -> Unit)? = null
 ) {
 
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+    private val settings = VectorSettings(context)
     val geminiBrain = GeminiBrainClient(context)
+    private val inAppTaskAgent = InAppTaskAgent(geminiBrain, onLog)
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var isTorchOn = false
 
@@ -52,21 +57,29 @@ class CommandExecutor(
     var isContinuousChatActive = false
         private set
 
-    fun stopContinuousChat(speakConfirmation: Boolean = false) {
+    fun stopContinuousChat(speakConfirmation: Boolean = false, persistDisable: Boolean = false) {
         isContinuousChatActive = false
+        if (persistDisable) {
+            settings.isAutoContinuousChat = false
+        }
         VectorSessionState.setContinuousChat(false)
         geminiBrain.clearConversationHistory()
         if (speakConfirmation) {
-            speakAndFinish("Theek hai boss, continuous chat band ho gayi hai. Normal wake mode active hai.", "Live Chat Off")
+            speakAndFinish("Theek hai boss, live chat band ho gayi hai. Ab 'Hey Vector' bol kar bula sakte hain.", "Live Chat Off")
         }
     }
 
-    fun startContinuousChat() {
+    fun startContinuousChat(silent: Boolean = false) {
         isContinuousChatActive = true
+        settings.isAutoContinuousChat = true
         VectorSessionState.setContinuousChat(true)
         geminiBrain.clearConversationHistory()
-        onLog("Live Chat: Continuous conversation ACTIVE")
-        val msg = "Guftugu shuru ho gayi hai boss. Ab aap bina Hey Vector bole lagatar baat kar sakte hain."
+        onLog("Live Chat: Continuous conversation ACTIVE (No wake-word needed)")
+        if (silent) {
+            onContinuousChatNextTurn?.invoke()
+            return
+        }
+        val msg = "Live chat open hai boss. Ab bina mic dabaye aur bina Hey Vector bole lagatar baat karein."
         VectorSessionState.addVectorMessage(msg, badge = "Live Chat On")
         speaker.speak(msg) {
             if (isContinuousChatActive) {
@@ -97,11 +110,11 @@ class CommandExecutor(
             cmd in setOf("torch off", "torch band", "torch band karo", "flashlight off", "batti off", "batti bujha do") -> {
                 toggleTorch(false); return
             }
-            cmd in setOf("start chat", "live chat", "long chat", "continuous chat", "guftugu shuru", "guftugu shuru karo") -> {
+            cmd in setOf("start chat", "live chat", "long chat", "continuous chat", "guftugu shuru", "guftugu shuru karo", "live chat on") -> {
                 startContinuousChat(); return
             }
-            isContinuousChatActive && cmd in setOf("stop chat", "chat band", "chat band karo", "guftugu band", "guftugu khatam", "bye", "alvida", "bas theek hai", "stop") -> {
-                stopContinuousChat(speakConfirmation = true); return
+            isContinuousChatActive && cmd in setOf("stop chat", "chat band", "chat band karo", "live chat band", "live chat off", "guftugu band", "guftugu khatam", "bye vector", "alvida") -> {
+                stopContinuousChat(speakConfirmation = true, persistDisable = true); return
             }
         }
 
@@ -131,7 +144,7 @@ class CommandExecutor(
                 onCycleComplete?.invoke()
             }
             "continuous_start" -> startContinuousChat()
-            "continuous_stop" -> stopContinuousChat(speakConfirmation = true)
+            "continuous_stop" -> stopContinuousChat(speakConfirmation = true, persistDisable = true)
             "torch_on" -> toggleTorch(true)
             "torch_off" -> toggleTorch(false)
             "time" -> handleTime()
@@ -141,8 +154,21 @@ class CommandExecutor(
             "call" -> handleCall(decision.target.ifBlank { decision.transcript })
             "whatsapp_bulk" -> handleMultiContactWhatsAppStructured(decision.target, decision.message)
             "whatsapp_single" -> handleSingleWhatsAppStructured(decision.target, decision.message)
-            "youtube" -> handleYouTube(decision.message.ifBlank { decision.target })
+            "whatsapp_reply" -> handleWhatsAppReply(decision.target, decision.message, decision.reply)
+            "read_screen" -> handleReadScreen()
+            "app_click" -> handleAppClick(decision.target.ifBlank { decision.message })
+            "app_type" -> handleAppType(decision.message.ifBlank { decision.target })
+            "app_scroll" -> handleAppScroll(decision.target)
+            "youtube_play" -> handleYouTube(decision.message.ifBlank { decision.target }, autoPlay = true)
+            "youtube" -> {
+                val tLower = decision.transcript.lowercase(Locale.getDefault())
+                val wantsPlay = tLower.contains("play") || tLower.contains("chala") ||
+                    tLower.contains("lagao") || tLower.contains("sunao") || tLower.contains("baja")
+                handleYouTube(decision.message.ifBlank { decision.target }, autoPlay = wantsPlay)
+            }
             "open_app" -> handleOpenApp(decision.target.ifBlank { decision.transcript })
+            "app_task" -> handleAppTask(decision.target, decision.message.ifBlank { decision.transcript })
+            "media_control" -> handleMediaControl(decision.target.ifBlank { decision.transcript })
             "save_contact" -> handleSaveContactStructured(decision.target, decision.message, decision.transcript)
             "call_history" -> handleCallHistory()
             "vip_add" -> handleVipContactSetup(decision.target.ifBlank { decision.transcript })
@@ -179,7 +205,7 @@ class CommandExecutor(
                 startContinuousChat()
             }
             isContinuousChatActive && (command.contains("chat band") || command.contains("guftugu band") || command.contains("stop chat") || command == "bye" || command == "alvida" || command == "stop") -> {
-                stopContinuousChat(speakConfirmation = true)
+                stopContinuousChat(speakConfirmation = true, persistDisable = true)
             }
             command.contains("kya yaad") || command.contains("meri memories") || command.contains("what do you remember") -> {
                 handleRecallMemories()
@@ -190,6 +216,12 @@ class CommandExecutor(
             command.contains("memories clear") || command.contains("sab bhool jao") || command.contains("clear memories") -> {
                 geminiBrain.memoryManager.clearAllMemories()
                 speakAndFinish("Main ne aapki saari personal memories clear kar di hain.", "Memory Cleared")
+            }
+            command.contains("screen par kya") || command.contains("screen read") || command.contains("read screen") -> {
+                handleReadScreen()
+            }
+            command.contains("is ka reply") || command.contains("reply do") || command.contains("jawab do") -> {
+                handleWhatsAppReply("", rawText, "")
             }
             (command.contains("in sab") || command.contains("sab ko") || command.contains("campaign")) && command.contains("whatsapp") -> {
                 handleMultiContactWhatsAppRaw(rawText)
@@ -206,17 +238,44 @@ class CommandExecutor(
             command.contains("vip") && (command.contains("add") || command.contains("lagao") || command.contains("set") || command.contains("contact")) -> {
                 handleVipContactSetup(command)
             }
-            command.contains("youtube") && (command.contains("search") || command.contains("play") || command.contains("chalao") || command.contains("open") || command.contains("kholo")) -> {
+            command.contains("skip ad") || command.contains("ad skip") -> {
+                handleMediaControl("skip_ad")
+            }
+            command in setOf("pause", "roko", "pause karo", "stop video", "stop music") -> {
+                handleMediaControl("play_pause")
+            }
+            command in setOf("play", "resume", "chalao", "dubara chalao", "play karo") -> {
+                val acc = VectorAccessibilityService.instance
+                if (acc?.captureScreenContext(200)?.contains("com.google.android.youtube") == true) {
+                    inAppTaskAgent.runTask(
+                        goal = "Play the first matching video on YouTube",
+                        initialWaitMs = 200L,
+                        youtubeAutoPlayPackage = "com.google.android.youtube"
+                    ) { reply, badge -> speakAndFinish(reply, badge) }
+                } else {
+                    handleMediaControl("play_pause")
+                }
+            }
+            command in setOf("next", "next song", "next video", "agla gana", "agla") -> {
+                handleMediaControl("next")
+            }
+            command.contains("youtube") && (command.contains("search") || command.contains("play") || command.contains("chala") || command.contains("lagao") || command.contains("sunao") || command.contains("open") || command.contains("kholo")) -> {
+                val wantsPlay = command.contains("play") || command.contains("chala") || command.contains("lagao") || command.contains("sunao")
                 val query = command
                     .replace("youtube", "")
                     .replace("per search karo", "")
+                    .replace("par", "")
                     .replace("search", "")
                     .replace("play", "")
                     .replace("chalao", "")
+                    .replace("chala do", "")
+                    .replace("lagao", "")
+                    .replace("sunao", "")
                     .replace("open", "")
                     .replace("kholo", "")
+                    .replace("karo", "")
                     .trim()
-                handleYouTube(query)
+                handleYouTube(query, autoPlay = wantsPlay)
             }
             (command.contains("torch") || command.contains("flashlight") || command.contains("batti")) &&
                 (command.contains("off") || command.contains("band") || command.contains("bujha") || command.contains("stop")) -> {
@@ -390,17 +449,162 @@ class CommandExecutor(
     private fun handleSingleWhatsAppStructured(targetName: String, messageText: String) {
         val cleanTarget = targetName.trim()
         if (cleanTarget.isEmpty()) {
+            // If no target specified, maybe user wants to reply in active WhatsApp chat
+            val fallbackTarget = WhatsAppChatAgent.getBestReplyTarget()
+            if (fallbackTarget.isNotEmpty()) {
+                handleWhatsAppReply(fallbackTarget, messageText, "")
+                return
+            }
             speakAndFinish("Kis contact ko WhatsApp message bhejna hai?", badge = "WhatsApp")
             return
         }
         val finalMsg = messageText.ifBlank { "Salam!" }
+        WhatsAppChatAgent.markContactMessaged(cleanTarget)
         val phoneNumber = lookupContactNumber(cleanTarget)
         onLog("WhatsApp -> $cleanTarget ($phoneNumber): \"$finalMsg\"")
+
+        // Check if user already has an active Direct-Reply notification for this exact sender
+        val directSent = WhatsAppChatAgent.sendDirectNotificationReply(context, cleanTarget, finalMsg)
+        if (directSent) {
+            speakAndFinish(
+                "$cleanTarget ko '$finalMsg' send kar diya gaya hai. Reply aane par main aapko bata doonga.",
+                badge = "WhatsApp Sent • $cleanTarget"
+            )
+            return
+        }
+
+        onWakeScreenRequested?.invoke(true)
+        WhatsAppChatAgent.armAutoSend(cleanTarget)
         val launched = dispatchWhatsAppMessage(phoneNumber, finalMsg)
         if (launched) {
-            speakAndFinish("WhatsApp per $cleanTarget ka message open kar diya gaya hai.", badge = "WhatsApp • $cleanTarget")
+            val accOn = VectorAccessibilityService.instance != null
+            val spoken = if (accOn) {
+                "$cleanTarget ko '$finalMsg' WhatsApp par bhej raha hoon. Unka jawab aane par aapko bata doonga."
+            } else {
+                "WhatsApp par $cleanTarget ka message tayar kar diya hai. Auto-send ke liye Accessibility on karein."
+            }
+            speakAndFinish(spoken, badge = "WhatsApp • $cleanTarget")
         } else {
+            WhatsAppChatAgent.consumeAutoSendIfArmed()
             speakAndFinish("WhatsApp open nahi ho saka. App install ya overlay permission check karein.", badge = "WhatsApp Error")
+        }
+    }
+
+    private fun handleWhatsAppReply(targetRaw: String, messageRaw: String, replyHint: String) {
+        val target = WhatsAppChatAgent.getBestReplyTarget(targetRaw)
+        val msgToSend = messageRaw.ifBlank { "Theek hai, thori der mein baat karte hain!" }.trim()
+
+        // 1. Best path: Instant background RemoteInput Direct Reply (works even when screen is off or locked!)
+        if (WhatsAppChatAgent.sendDirectNotificationReply(context, target, msgToSend)) {
+            val displayTarget = target.ifBlank { "contact" }
+            onLog("WhatsApp Direct Reply -> $displayTarget: \"$msgToSend\"")
+            speakAndFinish(
+                "$displayTarget ko reply bhej diya hai: '$msgToSend'",
+                badge = "Replied • $displayTarget"
+            )
+            return
+        }
+
+        // 2. If WhatsApp is already open on screen, type & send directly inside current chat via Accessibility
+        val acc = VectorAccessibilityService.instance
+        if (acc != null) {
+            val screenText = acc.captureScreenContext(200)
+            if (screenText.contains("com.whatsapp")) {
+                if (acc.sendTextInCurrentApp(msgToSend)) {
+                    onLog("WhatsApp UI Reply typed & sent: \"$msgToSend\"")
+                    speakAndFinish("WhatsApp chat mein reply bhej diya hai: '$msgToSend'", badge = "WhatsApp Sent")
+                    return
+                }
+            }
+        }
+
+        // 3. Fallback: Open WhatsApp chat with pre-filled message & arm auto-send
+        if (target.isNotBlank()) {
+            handleSingleWhatsAppStructured(target, msgToSend)
+        } else {
+            val info = replyHint.ifBlank {
+                "Abhi koi recent WhatsApp notification ya open chat nahi mili. Pehle contact ka naam bolein."
+            }
+            speakAndFinish(info, badge = "WhatsApp")
+        }
+    }
+
+    private fun handleReadScreen() {
+        val acc = VectorAccessibilityService.instance
+        if (acc == null) {
+            speakAndFinish(
+                "Screen parhne ke liye Settings mein Accessibility Service 'Vector Assistant' on karein.",
+                badge = "Accessibility Required"
+            )
+            return
+        }
+        val screenContext = acc.captureScreenContext(1600)
+        if (screenContext.isBlank()) {
+            speakAndFinish("Abhi screen par kuch readable text nazar nahi aa raha.", badge = "Screen Reader")
+            return
+        }
+        if (geminiBrain.isConnected()) {
+            scope.launch {
+                val prompt = "Read and summarize concisely in 1-3 spoken Roman Urdu sentences what is currently visible on the user's phone screen:\n$screenContext"
+                val summary = geminiBrain.askGemini(prompt, isContinuousSession = isContinuousChatActive)
+                speakAndFinish(summary, badge = "Screen Reader")
+            }
+        } else {
+            speakAndFinish(screenContext.take(260), badge = "Screen Reader")
+        }
+    }
+
+    private fun handleAppClick(targetLabel: String) {
+        val acc = VectorAccessibilityService.instance
+        if (acc == null) {
+            speakAndFinish("App control ke liye Accessibility Service on karein.", badge = "Accessibility Required")
+            return
+        }
+        val clean = targetLabel.trim()
+        if (clean.isEmpty()) {
+            speakAndFinish("Kis cheez par click karna hai?", badge = "UI Action")
+            return
+        }
+        onWakeScreenRequested?.invoke(true)
+        if (acc.clickElementByText(clean)) {
+            onLog("UI Click: \"$clean\"")
+            speakAndFinish("'$clean' par tap kar diya hai.", badge = "Tapped")
+        } else {
+            speakAndFinish("Screen par '$clean' button nahi mila.", badge = "UI Action")
+        }
+    }
+
+    private fun handleAppType(textToType: String) {
+        val acc = VectorAccessibilityService.instance
+        if (acc == null) {
+            speakAndFinish("App ke andar likhne ke liye Accessibility Service on karein.", badge = "Accessibility Required")
+            return
+        }
+        val clean = textToType.trim()
+        if (clean.isEmpty()) {
+            speakAndFinish("Kya likh kar send karna hai?", badge = "UI Input")
+            return
+        }
+        onWakeScreenRequested?.invoke(true)
+        if (acc.sendTextInCurrentApp(clean)) {
+            onLog("UI Typed & Submitted: \"$clean\"")
+            speakAndFinish("'$clean' likh kar bhej diya hai.", badge = "Sent In App")
+        } else {
+            speakAndFinish("Is screen par koi text box nahi mila.", badge = "UI Input")
+        }
+    }
+
+    private fun handleAppScroll(direction: String) {
+        val acc = VectorAccessibilityService.instance
+        if (acc == null) {
+            speakAndFinish("Scroll karne ke liye Accessibility Service on karein.", badge = "Accessibility Required")
+            return
+        }
+        val forward = !direction.contains("up", ignoreCase = true) && !direction.contains("upar", ignoreCase = true)
+        if (acc.scrollScreen(forward)) {
+            speakAndFinish(if (forward) "Neeche scroll kar diya hai." else "Upar scroll kar diya hai.", badge = "Scrolled")
+        } else {
+            speakAndFinish("Yeh screen scroll nahi ho rahi.", badge = "Scroll")
         }
     }
 
@@ -610,13 +814,26 @@ class CommandExecutor(
         }
     }
 
-    private fun handleYouTube(queryRaw: String) {
+    private fun handleYouTube(queryRaw: String, autoPlay: Boolean = false) {
         val query = queryRaw.trim()
         if (query.isEmpty()) {
+            if (autoPlay) {
+                val acc = VectorAccessibilityService.instance
+                if (acc?.captureScreenContext(200)?.contains("com.google.android.youtube") == true) {
+                    inAppTaskAgent.runTask(
+                        goal = "Play the top video currently visible on YouTube",
+                        initialWaitMs = 200L,
+                        youtubeAutoPlayPackage = "com.google.android.youtube"
+                    ) { reply, badge -> speakAndFinish(reply, badge) }
+                    return
+                }
+            }
             handleOpenApp("youtube")
             return
         }
-        onLog("Action: YouTube search \"$query\"")
+        inAppTaskAgent.cancelCurrentTask()
+        onWakeScreenRequested?.invoke(true)
+        onLog("Action: YouTube ${if (autoPlay) "Play" else "Search"} \"$query\"")
         try {
             val intent = Intent(Intent.ACTION_SEARCH).apply {
                 setPackage("com.google.android.youtube")
@@ -630,7 +847,114 @@ class CommandExecutor(
             }
             context.startActivity(webIntent)
         }
-        speakAndFinish("YouTube per $query search kar raha hoon.", badge = "YouTube")
+
+        if (autoPlay) {
+            if (VectorAccessibilityService.instance != null) {
+                speaker.speak("YouTube par $query play kar raha hoon.")
+                inAppTaskAgent.runTask(
+                    goal = "Click and play the best matching non-sponsored video for '$query' on YouTube",
+                    initialWaitMs = 2200L,
+                    youtubeAutoPlayPackage = "com.google.android.youtube"
+                ) { reply, badge ->
+                    if (badge == "YouTube Play") {
+                        VectorSessionState.addVectorMessage(reply, badge = badge)
+                        onLog("YouTube Auto-Play: $reply")
+                        if (isContinuousChatActive) {
+                            onContinuousChatNextTurn?.invoke()
+                        } else {
+                            onCycleComplete?.invoke()
+                        }
+                    } else {
+                        speakAndFinish(reply, badge = badge)
+                    }
+                }
+            } else {
+                speakAndFinish(
+                    "YouTube par $query search khol diya hai. Auto-play ke liye Accessibility 'Vector Assistant' on karein.",
+                    badge = "YouTube"
+                )
+            }
+        } else {
+            speakAndFinish("YouTube per $query search kar raha hoon.", badge = "YouTube")
+        }
+    }
+
+    private fun handleAppTask(appTargetRaw: String, goalRaw: String) {
+        val cleanGoal = goalRaw.trim()
+        if (cleanGoal.isEmpty()) {
+            speakAndFinish("App ke andar kya kaam karna hai?", badge = "UI Task")
+            return
+        }
+        inAppTaskAgent.cancelCurrentTask()
+
+        if (VectorAccessibilityService.instance == null) {
+            speakAndFinish(
+                "Kisi bhi app ke andar khud task complete karne ke liye Settings mein Accessibility Service 'Vector Assistant' on karein.",
+                badge = "Accessibility Required"
+            )
+            return
+        }
+
+        val appName = appTargetRaw
+            .replace("open", "", ignoreCase = true)
+            .replace("kholo", "", ignoreCase = true)
+            .replace("khol kar", "", ignoreCase = true)
+            .trim()
+
+        var waitMs = 300L
+        if (appName.isNotEmpty()) {
+            val opened = launchAppByQuery(appName)
+            if (opened == null) {
+                speakAndFinish("App '$appName' phone mein nahi mili.", badge = "App Not Found")
+                return
+            }
+            onLog("App Task: Launched $opened -> Goal: \"$cleanGoal\"")
+            waitMs = 2100L
+        } else {
+            onWakeScreenRequested?.invoke(true)
+            onLog("App Task (Current Screen): \"$cleanGoal\"")
+        }
+
+        inAppTaskAgent.runTask(
+            goal = cleanGoal,
+            initialWaitMs = waitMs,
+            youtubeAutoPlayPackage = if (appName.contains("youtube", ignoreCase = true)) "com.google.android.youtube" else null
+        ) { reply, badge ->
+            speakAndFinish(reply, badge = badge)
+        }
+    }
+
+    private fun handleMediaControl(commandRaw: String) {
+        val cmd = commandRaw.lowercase(Locale.getDefault()).trim()
+        if (cmd.contains("skip")) {
+            val skipped = VectorAccessibilityService.instance?.clickSkipAdIfPresent() == true
+            if (skipped) {
+                speakAndFinish("Ad skip kar diya gaya hai.", badge = "Media")
+            } else {
+                speakAndFinish("Abhi screen par Skip Ad button nazar nahi aaya.", badge = "Media")
+            }
+            return
+        }
+
+        val keyCode = when {
+            cmd.contains("next") || cmd.contains("agla") -> KeyEvent.KEYCODE_MEDIA_NEXT
+            cmd.contains("prev") || cmd.contains("pichla") -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
+            else -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+        }
+
+        try {
+            audioManager?.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+            audioManager?.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+            val label = when (keyCode) {
+                KeyEvent.KEYCODE_MEDIA_NEXT -> "Agla track play kar diya hai."
+                KeyEvent.KEYCODE_MEDIA_PREVIOUS -> "Pichla track play kar diya hai."
+                else -> "Media play pause toggle kar diya hai."
+            }
+            speakAndFinish(label, badge = "Media Control")
+        } catch (e: Exception) {
+            onLog("Media key error: ${e.message}")
+            speakAndFinish("Media control send nahi ho saka.", badge = "Media")
+        }
     }
 
     private fun handleCall(rawTarget: String) {
@@ -660,6 +984,7 @@ class CommandExecutor(
         val phoneNumber = if (digitsOnly.length >= 5) digitsOnly else lookupContactNumber(targetName)
 
         if (phoneNumber != null) {
+            onWakeScreenRequested?.invoke(true)
             onLog("Action: Calling $targetName ($phoneNumber)")
             val callIntent = Intent(Intent.ACTION_CALL).apply {
                 data = Uri.parse("tel:$phoneNumber")
@@ -691,37 +1016,62 @@ class CommandExecutor(
             return
         }
 
-        val pm = context.packageManager
-        val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-
-        var matchedPackage: String? = null
-        var matchedLabel: String = appQuery
-        for (app in packages) {
-            val label = pm.getApplicationLabel(app).toString()
-            val lowerLabel = label.lowercase(Locale.getDefault())
-            val lowerQuery = appQuery.lowercase(Locale.getDefault())
-            if (lowerLabel == lowerQuery || lowerLabel.contains(lowerQuery)) {
-                if (pm.getLaunchIntentForPackage(app.packageName) != null) {
-                    matchedPackage = app.packageName
-                    matchedLabel = label
-                    break
-                }
-            }
-        }
-
-        if (matchedPackage != null) {
-            val launchIntent = pm.getLaunchIntentForPackage(matchedPackage)
-            if (launchIntent != null) {
-                launchIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                context.startActivity(launchIntent)
-                onLog("Action: Opened $matchedLabel ($matchedPackage)")
-                speakAndFinish("$matchedLabel khol raha hoon.", badge = "App • $matchedLabel")
-                return
-            }
+        val launchedLabel = launchAppByQuery(appQuery)
+        if (launchedLabel != null) {
+            speakAndFinish("$launchedLabel khol raha hoon.", badge = "App • $launchedLabel")
+            return
         }
 
         onLog("App not found: $appQuery")
         speakAndFinish("App $appQuery phone mein nahi mili.", badge = "App Not Found")
+    }
+
+    private fun launchAppByQuery(appQuery: String): String? {
+        val pm = context.packageManager
+        val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+        val lowerQuery = appQuery.lowercase(Locale.getDefault())
+
+        var exactMatchPkg: String? = null
+        var exactLabel = appQuery
+        var prefixMatchPkg: String? = null
+        var prefixLabel = appQuery
+        var partialMatchPkg: String? = null
+        var partialLabel = appQuery
+
+        for (app in packages) {
+            if (pm.getLaunchIntentForPackage(app.packageName) == null) continue
+            val label = pm.getApplicationLabel(app).toString()
+            val lowerLabel = label.lowercase(Locale.getDefault())
+            when {
+                lowerLabel == lowerQuery -> {
+                    exactMatchPkg = app.packageName
+                    exactLabel = label
+                    break
+                }
+                lowerLabel.startsWith(lowerQuery) && prefixMatchPkg == null -> {
+                    prefixMatchPkg = app.packageName
+                    prefixLabel = label
+                }
+                lowerLabel.contains(lowerQuery) && partialMatchPkg == null -> {
+                    partialMatchPkg = app.packageName
+                    partialLabel = label
+                }
+            }
+        }
+
+        val chosenPkg = exactMatchPkg ?: prefixMatchPkg ?: partialMatchPkg ?: return null
+        val chosenLabel = when (chosenPkg) {
+            exactMatchPkg -> exactLabel
+            prefixMatchPkg -> prefixLabel
+            else -> partialLabel
+        }
+
+        val launchIntent = pm.getLaunchIntentForPackage(chosenPkg) ?: return null
+        onWakeScreenRequested?.invoke(true)
+        launchIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        context.startActivity(launchIntent)
+        onLog("Action: Opened $chosenLabel ($chosenPkg)")
+        return chosenLabel
     }
 
     private fun toggleTorch(enable: Boolean) {

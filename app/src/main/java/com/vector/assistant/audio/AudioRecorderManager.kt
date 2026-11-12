@@ -77,7 +77,7 @@ class AudioRecorderManager(
         captureMode = mode
         resetBufferFlag = true
         if (mode == CaptureMode.DIRECT_COMMAND) {
-            directCommandDeadlineMs = System.currentTimeMillis() + timeoutMs
+            directCommandDeadlineMs = if (timeoutMs <= 0L) Long.MAX_VALUE else System.currentTimeMillis() + timeoutMs
         }
     }
 
@@ -89,8 +89,8 @@ class AudioRecorderManager(
             muteUntilMs = System.currentTimeMillis() + tailGuardMs
             isInputMuted = false
             resetBufferFlag = true
-            if (captureMode == CaptureMode.DIRECT_COMMAND) {
-                directCommandDeadlineMs = System.currentTimeMillis() + 7500L
+            if (captureMode == CaptureMode.DIRECT_COMMAND && directCommandDeadlineMs != Long.MAX_VALUE) {
+                directCommandDeadlineMs = System.currentTimeMillis() + 9000L
             }
         }
     }
@@ -304,8 +304,8 @@ class AudioRecorderManager(
                 }
 
                 val isDirect = (captureMode == CaptureMode.DIRECT_COMMAND)
-                val maxSilenceFrames = if (isDirect) 13 else 11 // ~830ms vs ~700ms
-                val maxSamples = if (isDirect) sampleRate * 10 else sampleRate * 7
+                val maxSilenceFrames = if (isDirect) 14 else 11 // ~900ms vs ~700ms
+                val maxSamples = if (isDirect) sampleRate * 12 else sampleRate * 7
 
                 if (silenceFrames >= maxSilenceFrames || voiceBuffer.size >= maxSamples) {
                     val pcm = voiceBuffer.toShortArray()

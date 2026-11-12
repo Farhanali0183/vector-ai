@@ -1,6 +1,7 @@
 package com.vector.assistant.ui
 
 import android.Manifest
+import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -8,6 +9,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.view.View
+import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -28,6 +30,10 @@ import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
 
+    companion object {
+        const val EXTRA_DISMISS_KEYGUARD = "extra_dismiss_keyguard"
+    }
+
     private lateinit var binding: ActivityMainBinding
     private lateinit var settings: VectorSettings
     private lateinit var geminiBrain: GeminiBrainClient
@@ -47,6 +53,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableLockscreenWakeFlags()
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
@@ -57,6 +64,36 @@ class MainActivity : AppCompatActivity() {
         setupClickListeners()
         observeSessionState()
         checkAndRequestPermissions()
+        handleLockscreenIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleLockscreenIntent(intent)
+    }
+
+    private fun enableLockscreenWakeFlags() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+            )
+        }
+    }
+
+    private fun handleLockscreenIntent(incoming: Intent?) {
+        if (incoming?.getBooleanExtra(EXTRA_DISMISS_KEYGUARD, false) == true) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val km = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+                km?.requestDismissKeyguard(this, null)
+            }
+        }
     }
 
     override fun onResume() {
@@ -143,10 +180,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Quick command suggestion chips
-        binding.chipPrompt1.setOnClickListener { sendPromptText("Time kya hua?") }
-        binding.chipPrompt2.setOnClickListener { sendPromptText("Battery status") }
-        binding.chipPrompt3.setOnClickListener { sendPromptText("Torch on karo") }
-        binding.chipPrompt4.setOnClickListener { sendPromptText("Mujhe ek interesting science fact sunao") }
+        binding.chipPrompt1.setOnClickListener { sendPromptText("Ali ko salam bhejo WhatsApp par") }
+        binding.chipPrompt2.setOnClickListener { sendPromptText("Is ka koi sweet sa reply do") }
+        binding.chipPrompt3.setOnClickListener { sendPromptText("Screen par kya hai parho") }
+        binding.chipPrompt4.setOnClickListener { sendPromptText("YouTube par naya trending gana search karo") }
     }
 
     private fun observeSessionState() {
@@ -253,7 +290,21 @@ class MainActivity : AppCompatActivity() {
         if (existing != null) return
         SettingsBottomSheet().apply {
             onRequestRuntimePermissions = { checkAndRequestPermissions() }
-            onSettingsChanged = { refreshSetupBannerAndHeader() }
+            onSettingsChanged = {
+                refreshSetupBannerAndHeader()
+                if (VectorVoiceService.isServiceRunning) {
+                    startService(Intent(this@MainActivity, VectorVoiceService::class.java).apply {
+                        action = VectorVoiceService.ACTION_REFRESH_SETTINGS
+                    })
+                } else {
+                    val hasMic = ContextCompat.checkSelfPermission(
+                        this@MainActivity, Manifest.permission.RECORD_AUDIO
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (hasMic && !settings.userExplicitlyPaused) {
+                        startVectorService()
+                    }
+                }
+            }
         }.show(supportFragmentManager, "VectorSettingsSheet")
     }
 

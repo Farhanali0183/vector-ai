@@ -134,11 +134,27 @@
                 android:textStyle="bold" />
 
             <com.google.android.material.switchmaterial.SwitchMaterial
-                android:id="@+id/switchHybridWake"
+                android:id="@+id/switchAutoContinuousChat"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:text="Hands-Free 'Hey Vector' / 'Suno Vector' (Screen-Off Ready)"
+                android:text="Always-On Live Chat (No Mic Tap &amp; No Wake Word)"
+                android:textColor="@color/text_primary"
+                android:textSize="13sp" />
+
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/switchWhatsAppAssistant"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="WhatsApp Live Reply Announcer &amp; Auto-Send"
+                android:textColor="@color/text_primary"
+                android:textSize="13sp" />
+
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/switchHybridWake"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Hands-Free 'Hey Vector' / 'Suno Vector' (When Live Chat Off)"
                 android:textColor="@color/text_primary"
                 android:textSize="13sp" />
 

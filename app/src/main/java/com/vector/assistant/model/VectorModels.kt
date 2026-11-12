@@ -53,6 +53,21 @@ class VectorSettings(context: Context) {
         set(value) = prefs.edit().putBoolean("overlay_hud_enabled", value).apply()
 
     /**
+     * Keeps Continuous Live Chat active automatically so the user does not need to tap mic
+     * or repeat "Hey Vector" before every single command.
+     */
+    var isAutoContinuousChat: Boolean
+        get() = prefs.getBoolean("auto_continuous_chat", true)
+        set(value) = prefs.edit().putBoolean("auto_continuous_chat", value).apply()
+
+    /**
+     * Announces incoming WhatsApp replies aloud and lets the user reply/chat hands-free.
+     */
+    var isWhatsAppAssistantEnabled: Boolean
+        get() = prefs.getBoolean("whatsapp_assistant_enabled", true)
+        set(value) = prefs.edit().putBoolean("whatsapp_assistant_enabled", value).apply()
+
+    /**
      * 0 = High sensitivity (far mic), 1 = Balanced (default), 2 = Strict (noisy rooms)
      */
     var micSensitivityLevel: Int

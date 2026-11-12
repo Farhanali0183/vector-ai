@@ -152,6 +152,17 @@ class SettingsBottomSheet : BottomSheetDialogFragment() {
     }
 
     private fun setupBehaviorControls() {
+        binding.switchAutoContinuousChat.isChecked = settings.isAutoContinuousChat
+        binding.switchAutoContinuousChat.setOnCheckedChangeListener { _, isChecked ->
+            settings.isAutoContinuousChat = isChecked
+            onSettingsChanged?.invoke()
+        }
+
+        binding.switchWhatsAppAssistant.isChecked = settings.isWhatsAppAssistantEnabled
+        binding.switchWhatsAppAssistant.setOnCheckedChangeListener { _, isChecked ->
+            settings.isWhatsAppAssistantEnabled = isChecked
+        }
+
         binding.switchHybridWake.isChecked = settings.isSmartHybridWakeEnabled
         binding.switchHybridWake.setOnCheckedChangeListener { _, isChecked ->
             settings.isSmartHybridWakeEnabled = isChecked

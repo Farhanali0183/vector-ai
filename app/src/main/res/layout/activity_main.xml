@@ -264,7 +264,7 @@
                         android:background="@drawable/bg_pill_surface"
                         android:paddingHorizontal="12dp"
                         android:paddingVertical="8dp"
-                        android:text="Time kya hua?"
+                        android:text="Ali ko salam bhejo"
                         android:textColor="@color/neon_cyan"
                         android:textSize="12sp" />
 
@@ -276,7 +276,7 @@
                         android:background="@drawable/bg_pill_surface"
                         android:paddingHorizontal="12dp"
                         android:paddingVertical="8dp"
-                        android:text="Battery status"
+                        android:text="Sweet sa reply do"
                         android:textColor="@color/neon_cyan"
                         android:textSize="12sp" />
 
@@ -288,7 +288,7 @@
                         android:background="@drawable/bg_pill_surface"
                         android:paddingHorizontal="12dp"
                         android:paddingVertical="8dp"
-                        android:text="Torch on karo"
+                        android:text="Screen par kya hai?"
                         android:textColor="@color/neon_cyan"
                         android:textSize="12sp" />
 
@@ -300,7 +300,7 @@
                         android:background="@drawable/bg_pill_surface"
                         android:paddingHorizontal="12dp"
                         android:paddingVertical="8dp"
-                        android:text="AI se ek fact sunao"
+                        android:text="YouTube play karo"
                         android:textColor="@color/neon_cyan"
                         android:textSize="12sp" />
                 </LinearLayout>

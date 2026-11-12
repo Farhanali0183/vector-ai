@@ -1,6 +1,8 @@
 package com.vector.assistant.service
 
 import android.app.Notification
+import android.app.PendingIntent
+import android.app.RemoteInput
 import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
@@ -11,12 +13,16 @@ import android.os.Looper
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import com.vector.assistant.audio.VoiceSpeaker
+import com.vector.assistant.automation.WhatsAppChatAgent
+import com.vector.assistant.model.VectorSettings
 
 /**
- * Listens for incoming WhatsApp and SMS messages.
- * If message is from a designated VIP contact, it sounds a UNIQUE ALARM
- * and speaks out loud who texted!
+ * Listens for incoming WhatsApp & SMS notifications in real time:
+ * 1. Captures RemoteInput Direct-Reply action so Vector can reply to messages completely hands-free!
+ * 2. Announces incoming WhatsApp replies to VectorVoiceService when user is waiting/chatting.
+ * 3. Sounds a VIP Siren Alarm + speaks alert when a VIP contact texts.
  */
 class VectorNotificationListenerService : NotificationListenerService() {
 
@@ -76,18 +82,48 @@ class VectorNotificationListenerService : NotificationListenerService() {
         super.onNotificationPosted(sbn)
         if (sbn == null) return
 
-        val pkg = sbn.packageName ?: ""
-        // Check if notification is from WhatsApp or SMS
-        val isWhatsApp = pkg.contains("whatsapp")
-        val isSms = pkg.contains("messaging") || pkg.contains("sms") || pkg.contains("mms")
+        val notification = sbn.notification ?: return
+        if ((notification.flags and Notification.FLAG_GROUP_SUMMARY) != 0) return
 
+        val pkg = sbn.packageName ?: ""
+        val isWhatsApp = pkg == "com.whatsapp" || pkg == "com.whatsapp.w4b"
+        val isSms = pkg.contains("messaging") || pkg.contains("sms") || pkg.contains("mms")
         if (!isWhatsApp && !isSms) return
 
-        val extras = sbn.notification.extras ?: return
-        val senderTitle = extras.getString(Notification.EXTRA_TITLE) ?: ""
-        val messageText = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
+        val extras = notification.extras ?: return
+        var senderTitle = extras.getString(Notification.EXTRA_CONVERSATION_TITLE)?.trim().orEmpty()
+        if (senderTitle.isEmpty()) {
+            senderTitle = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
+        }
 
-        if (senderTitle.isEmpty()) return
+        var messageText = extractLatestMessageText(notification)
+        if (messageText.isEmpty()) {
+            messageText = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim().orEmpty()
+        }
+
+        if (senderTitle.isEmpty() || messageText.isEmpty()) return
+
+        // Ignore WhatsApp background sync / self notifications
+        val lowerTitle = senderTitle.lowercase()
+        val lowerMsg = messageText.lowercase()
+        if (lowerTitle == "whatsapp" ||
+            lowerMsg.contains("checking for new messages") ||
+            lowerMsg.contains("messages from") ||
+            lowerMsg.contains("new messages") ||
+            lowerMsg.startsWith("you:")
+        ) {
+            return
+        }
+
+        val (replyIntent, remoteInput) = findDirectReplyAction(notification)
+        val isFresh = WhatsAppChatAgent.recordIncomingMessage(
+            sender = senderTitle,
+            packageName = pkg,
+            messageText = messageText,
+            replyAction = replyIntent,
+            remoteInput = remoteInput
+        )
+        if (!isFresh) return
 
         val vipContacts = getVipContacts(this)
         val isVip = vipContacts.any { vip ->
@@ -97,22 +133,54 @@ class VectorNotificationListenerService : NotificationListenerService() {
         if (isVip) {
             triggerVipAlarm(senderTitle, messageText)
         }
+
+        val settings = VectorSettings(this)
+        if (VectorVoiceService.isServiceRunning && (settings.isWhatsAppAssistantEnabled || WhatsAppChatAgent.isWatchedContact(senderTitle))) {
+            val alertIntent = Intent(this, VectorVoiceService::class.java).apply {
+                action = VectorVoiceService.ACTION_INCOMING_CHAT_ALERT
+                putExtra(VectorVoiceService.EXTRA_ALERT_SENDER, senderTitle)
+                putExtra(VectorVoiceService.EXTRA_ALERT_MESSAGE, messageText)
+                putExtra(VectorVoiceService.EXTRA_ALERT_IS_VIP, isVip)
+            }
+            try {
+                startService(alertIntent)
+            } catch (e: Exception) {
+                Log.w("VectorNotification", "Could not forward chat alert to VectorVoiceService: ${e.message}")
+            }
+        }
+    }
+
+    private fun extractLatestMessageText(notification: Notification): String {
+        val style = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(notification)
+        val lastMsg = style?.messages?.lastOrNull()
+        val text = lastMsg?.text?.toString()?.trim()
+        return text ?: ""
+    }
+
+    private fun findDirectReplyAction(notification: Notification): Pair<PendingIntent?, RemoteInput?> {
+        val actions = notification.actions ?: return Pair(null, null)
+        for (action in actions) {
+            val inputs = action.remoteInputs ?: continue
+            val textInput = inputs.firstOrNull { it.allowFreeFormInput } ?: inputs.firstOrNull()
+            if (textInput != null && action.actionIntent != null) {
+                return Pair(action.actionIntent, textInput)
+            }
+        }
+        return Pair(null, null)
     }
 
     private fun triggerVipAlarm(sender: String, message: String) {
-        // 1. Play Unique Loud Alarm Sound for 4 seconds
         try {
             alarmRingtone?.play()
             mainHandler.postDelayed({
                 try {
                     alarmRingtone?.stop()
-                } catch (e: Exception) {}
+                } catch (_: Exception) {}
             }, 4000)
         } catch (e: Exception) {
             Log.e("VectorNotification", "Failed to play alarm: ${e.message}")
         }
 
-        // 2. Speak VIP alert out loud
         mainHandler.postDelayed({
             val alertMsg = "Alert! VIP Message from $sender. Message: $message"
             speaker?.speak(alertMsg)
